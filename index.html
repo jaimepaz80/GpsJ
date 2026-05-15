@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -107,7 +106,6 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        // UI Elements
         const loginScreen = document.getElementById('loginScreen');
         const appScreen = document.getElementById('appScreen');
         const btnLogin = document.getElementById('btnLogin');
@@ -117,7 +115,6 @@
         const btnCalcular = document.getElementById('btnCalcular');
         const terminal = document.getElementById('terminal');
 
-        // SEGURIDAD: Generar DNI único para este navegador/dispositivo
         let deviceToken = localStorage.getItem('gpsn_device_token');
         if (!deviceToken) {
             deviceToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
@@ -126,7 +123,6 @@
 
         let sessionListenerUnsubscribe = null;
 
-        // ESCUCHADOR DE ESTADO DE SESIÓN
         onAuthStateChanged(auth, async (user) => {
             if (user) {
                 loginScreen.style.display = 'none';
@@ -134,37 +130,24 @@
                 userEmailDisplay.innerText = user.email;
 
                 try {
-                    // 1. Al iniciar sesión, escribir nuestro DNI en la base de datos
                     const userRef = doc(db, "sesiones_activas", user.email);
-                    await setDoc(userRef, {
-                        token: deviceToken,
-                        ultimoAcceso: serverTimestamp()
-                    });
+                    await setDoc(userRef, { token: deviceToken, ultimoAcceso: serverTimestamp() });
 
-                    // 2. Quedarnos "escuchando" ese documento en tiempo real
                     sessionListenerUnsubscribe = onSnapshot(userRef, (docSnap) => {
                         if (docSnap.exists()) {
                             const dbToken = docSnap.data().token;
-                            // Si el token en la nube cambió y ya no es el nuestro... ¡Alguien más entró!
                             if (dbToken && dbToken !== deviceToken) {
                                 alert("⚠️ CIERRE DE SEGURIDAD: Se ha iniciado sesión con esta cuenta en otro dispositivo.");
                                 signOut(auth);
                             }
                         }
                     });
-                } catch (e) {
-                    console.error("Error al registrar la sesión:", e);
-                }
+                } catch (e) { console.error("Error al registrar la sesión:", e); }
 
             } else {
-                // Nadie autenticado
                 loginScreen.style.display = 'block';
                 appScreen.style.display = 'none';
-                // Detener el escuchador si existe
-                if (sessionListenerUnsubscribe) {
-                    sessionListenerUnsubscribe();
-                    sessionListenerUnsubscribe = null;
-                }
+                if (sessionListenerUnsubscribe) { sessionListenerUnsubscribe(); sessionListenerUnsubscribe = null; }
             }
         });
 
@@ -186,29 +169,62 @@
         });
 
         btnLogout.addEventListener('click', () => {
-            signOut(auth).then(() => {
-                document.getElementById('txtPassword').value = "";
-            });
+            signOut(auth).then(() => { document.getElementById('txtPassword').value = ""; });
         });
 
         btnCalcular.addEventListener('click', async () => {
-            terminal.innerHTML = "[SISTEMA] Conectando con el Servidor Python en Vercel...\n";
-            terminal.innerHTML += "[INFO] Los nombres de los puntos se extraerán directamente del GPX.\n";
+            const base = document.getElementById('fileBase').files[0];
+            const rovers = document.getElementById('fileRovers').files;
+
+            if (!base || rovers.length === 0) { alert("Cargue la Base y al menos un Rover."); return; }
+            if (!document.getElementById('baseZ').value) { alert("Debe ingresar la Cota (Z) de la Base Oficial."); return; }
+
+            terminal.innerHTML = "[SISTEMA] Conectando con el Servidor Cloud GpsN...\n";
+            terminal.innerHTML += "[AUDITORÍA] Verificando sesión...\n";
             
-            // Registro de auditoría asíncrono (No bloquea la ejecución si el internet está lento)
             try {
                 const auditRef = doc(db, "auditoria_procesamiento", Date.now().toString());
                 setDoc(auditRef, {
                     usuario: auth.currentUser.email,
                     fecha: serverTimestamp(),
                     accion: "Cálculo Solicitado"
-                }).then(() => {
-                    terminal.innerHTML += "[OK] Auditoría de uso registrada en la nube.\n";
-                }).catch(e => console.error("Auditoría demorada", e));
+                });
             } catch(e) {}
             
-            terminal.innerHTML += "\n[ESPERA] Preparando Fase 1: Creación del Backend Python en la Nube...\n";
+            terminal.innerHTML += "[PROCESANDO] Transfiriendo paquetes a la RAM de Vercel y ejecutando Filtros Kalman...\n";
+            
+            const fd = new FormData();
+            fd.append('base', base);
+            for(let r of rovers) fd.append('rovers', r);
+            fd.append('baseE', document.getElementById('baseE').value);
+            fd.append('baseN', document.getElementById('baseN').value);
+            fd.append('baseZ', document.getElementById('baseZ').value);
+            fd.append('alturaBase', document.getElementById('alturaBase').value);
+            fd.append('alturaRover', document.getElementById('alturaRover').value);
+            fd.append('huso', document.getElementById('huso').value);
+
+            try {
+                const resp = await fetch('/api/procesar', { method:'POST', body:fd });
+                const data = await resp.json();
+
+                if (data.error) { terminal.innerHTML += `\n[ERROR CLOUD] ${data.error}`; } 
+                else {
+                    terminal.innerHTML = "";
+                    data.resultados.forEach(r => {
+                        terminal.innerHTML += `>> PUNTO: ${r.roverName} (Base: ${r.baseName})\n`;
+                        terminal.innerHTML += `Status: ${r.csv.qaStr}\n`;
+                        terminal.innerHTML += `Puntos Sincronizados: ${r.puntos} | DOP Medio: ${r.csv.dop}\n`;
+                        terminal.innerHTML += `Línea Base (Distancia a Base): ${r.csv.distBase}m\n`;
+                        terminal.innerHTML += `ERROR TOTAL BASE (SESIÓN) -> E:${r.csv.totalErrE}m | N:${r.csv.totalErrN}m | Z:${r.csv.totalErrZ}m\n`;
+                        terminal.innerHTML += `ERROR BASE (VENTANA)      -> E:${r.csv.winErrE}m | N:${r.csv.winErrN}m | Z:${r.csv.winErrZ}m\n`;
+                        terminal.innerHTML += `RUIDO BASE (RMS)          -> E:±${r.csv.rmsE}m | N:±${r.csv.rmsN}m | Z:±${r.csv.rmsZ}m\n`;
+                        terminal.innerHTML += `COORD. FINAL (KALMAN)     -> E:${r.csv.e} | N:${r.csv.n} | Z:${r.csv.z}\n`;
+                        terminal.innerHTML += `--------------------------------------------------\n`;
+                    });
+                }
+            } catch (e) { terminal.innerHTML += "\n[ERROR] El servidor en la nube no responde. Verifica que la carpeta /api esté creada en GitHub."; }
         });
     </script>
 </body>
 </html>
+
