@@ -23,6 +23,8 @@
         button:hover { opacity: 0.9; }
         .btn-logout { background: var(--danger); width: auto; padding: 8px 15px; float: right; margin-top: 0; font-size: 0.8rem; }
         
+        #btnExportar { background: var(--excel); display: none; margin-top: 15px; }
+
         .section { background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #ddd; clear: both; }
         .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
         #terminal { background: #111; color: #0f0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 0.85rem; min-height: 200px; overflow-y: auto; margin-top: 15px; white-space: pre-wrap; line-height: 1.4; }
@@ -83,6 +85,7 @@
         </div>
 
         <button id="btnCalcular">PROCESAR LEVANTAMIENTO EN LA NUBE</button>
+        <button id="btnExportar">📊 EXPORTAR REPORTE A EXCEL (.CSV)</button>
         
         <div id="terminal">Sistema listo. Esperando archivos GPX.</div>
     </div>
@@ -113,6 +116,7 @@
         const loginError = document.getElementById('loginError');
         const userEmailDisplay = document.getElementById('userEmailDisplay');
         const btnCalcular = document.getElementById('btnCalcular');
+        const btnExportar = document.getElementById('btnExportar');
         const terminal = document.getElementById('terminal');
 
         let deviceToken = localStorage.getItem('gpsn_device_token');
@@ -122,6 +126,7 @@
         }
 
         let sessionListenerUnsubscribe = null;
+        let ultimosResultados = []; // Aquí guardaremos los datos para Excel
 
         onAuthStateChanged(auth, async (user) => {
             if (user) {
@@ -175,12 +180,12 @@
         btnCalcular.addEventListener('click', async () => {
             const base = document.getElementById('fileBase').files[0];
             const rovers = document.getElementById('fileRovers').files;
+            btnExportar.style.display = 'none'; // Ocultar Excel hasta calcular
 
             if (!base || rovers.length === 0) { alert("Cargue la Base y al menos un Rover."); return; }
             if (!document.getElementById('baseZ').value) { alert("Debe ingresar la Cota (Z) de la Base Oficial."); return; }
 
             terminal.innerHTML = "[SISTEMA] Conectando con el Servidor Cloud GpsN...\n";
-            terminal.innerHTML += "[AUDITORÍA] Verificando sesión...\n";
             
             try {
                 const auditRef = doc(db, "auditoria_procesamiento", Date.now().toString());
@@ -210,6 +215,8 @@
                 if (data.error) { terminal.innerHTML += `\n[ERROR CLOUD] ${data.error}`; } 
                 else {
                     terminal.innerHTML = "";
+                    ultimosResultados = data.resultados; // Guardar para Excel
+                    
                     data.resultados.forEach(r => {
                         terminal.innerHTML += `>> PUNTO: ${r.roverName} (Base: ${r.baseName})\n`;
                         terminal.innerHTML += `Status: ${r.csv.qaStr}\n`;
@@ -221,10 +228,39 @@
                         terminal.innerHTML += `COORD. FINAL (KALMAN)     -> E:${r.csv.e} | N:${r.csv.n} | Z:${r.csv.z}\n`;
                         terminal.innerHTML += `--------------------------------------------------\n`;
                     });
+                    
+                    // Mostrar el botón de Excel una vez que todo sea exitoso
+                    btnExportar.style.display = 'block';
                 }
-            } catch (e) { terminal.innerHTML += "\n[ERROR] El servidor en la nube no responde. Verifica que la carpeta /api esté creada en GitHub."; }
+            } catch (e) { terminal.innerHTML += "\n[ERROR] El servidor en la nube no responde."; }
+        });
+
+        // FUNCION: GENERAR EXCEL (CSV)
+        btnExportar.addEventListener('click', () => {
+            if (ultimosResultados.length === 0) return;
+
+            let csvContent = "Identificador Rover,Identificador Base,Puntos Sincronizados,Estatus QA,DOP Medio,Distancia a Base (m),Error Total E (m),Error Total N (m),Error Total Z (m),Ruido RMS E (m),Ruido RMS N (m),Ruido RMS Z (m),Coordenada Este (Kalman),Coordenada Norte (Kalman),Cota Z (Kalman)\n";
+            
+            ultimosResultados.forEach(r => {
+                let row = [
+                    r.roverName, r.baseName, r.puntos, r.csv.qaStr, r.csv.dop, r.csv.distBase,
+                    r.csv.totalErrE, r.csv.totalErrN, r.csv.totalErrZ,
+                    r.csv.rmsE, r.csv.rmsN, r.csv.rmsZ,
+                    r.csv.e, r.csv.n, r.csv.z
+                ].join(","); // Separado por comas para formato CSV estándar
+                csvContent += row + "\n";
+            });
+
+            // Forzar la descarga del archivo .csv
+            const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' }); // El \uFEFF asegura que Excel lea los acentos y emojis
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.setAttribute("href", url);
+            link.setAttribute("download", "Reporte_Geodesico_GpsN.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
         });
     </script>
 </body>
 </html>
-
