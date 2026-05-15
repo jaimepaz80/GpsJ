@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GpsN - Cloud DGPS Processing</title>
+    <style>
+        :root { --primary: #2c3e50; --accent: #27ae60; --bg: #f4f7f6; --excel: #1d6f42; --danger: #e74c3c; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        
+        /* Contenedores Principales */
+        #loginScreen { width: 100%; max-width: 400px; padding: 30px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; }
+        #appScreen { display: none; width: 100%; max-width: 700px; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin: 20px; }
+        
+        h1 { color: var(--primary); margin-bottom: 20px; border-bottom: 2px solid var(--accent); padding-bottom: 10px; }
+        h2 { color: var(--primary); font-size: 1.2rem; }
+        
+        /* Estilos de Formularios */
+        .input-group { margin-bottom: 15px; text-align: left; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 0.85rem; color: #444; }
+        input[type="email"], input[type="password"], input[type="text"], input[type="number"], select, input[type="file"] { 
+            width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 1rem; 
+        }
+        
+        button { width: 100%; padding: 14px; background: var(--accent); color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px; }
+        button:hover { opacity: 0.9; }
+        .btn-logout { background: var(--danger); width: auto; padding: 8px 15px; float: right; margin-top: 0; font-size: 0.8rem; }
+        
+        /* Estilos de la App (Oculta al inicio) */
+        .section { background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #ddd; clear: both; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+        #terminal { background: #111; color: #0f0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 0.85rem; min-height: 200px; overflow-y: auto; margin-top: 15px; white-space: pre-wrap; line-height: 1.4; }
+        #loginError { color: var(--danger); font-size: 0.85rem; margin-top: 10px; display: none; }
+    </style>
+</head>
+<body>
+
+    <div id="loginScreen">
+        <h1>GpsN SaaS</h1>
+        <p style="font-size: 0.9rem; color: #666;">Portal de Post-Procesamiento Geodésico</p>
+        <div class="input-group">
+            <label>Usuario (Correo Electrónico)</label>
+            <input type="email" id="txtEmail" placeholder="topografo@empresa.com">
+        </div>
+        <div class="input-group">
+            <label>Contraseña</label>
+            <input type="password" id="txtPassword" placeholder="********">
+        </div>
+        <button id="btnLogin">INICIAR SESIÓN</button>
+        <div id="loginError">Credenciales incorrectas.</div>
+    </div>
+
+    <div id="appScreen">
+        <button class="btn-logout" id="btnLogout">Cerrar Sesión</button>
+        <h1>GpsN Procesador Diferencial</h1>
+        
+        <div class="section">
+            <p style="font-size: 0.85rem; color: #555; margin-top: 0;">Bienvenido, <span id="userEmailDisplay" style="font-weight: bold; color: var(--primary);"></span></p>
+            <label>1. Archivo Base Conocida (.gpx)</label>
+            <input type="file" id="fileBase" accept=".gpx">
+            
+            <label style="margin-top:15px;">2. Archivos Rover de Campo (.gpx)</label>
+            <input type="file" id="fileRovers" multiple accept=".gpx">
+        </div>
+
+        <div class="section">
+            <label>Coordenadas Oficiales (Base)</label>
+            <div class="grid-3">
+                <input type="number" id="baseE" placeholder="Este (X)">
+                <input type="number" id="baseN" placeholder="Norte (Y)">
+                <input type="number" id="baseZ" placeholder="Cota (Z)">
+            </div>
+        </div>
+
+        <button id="btnCalcular">PROCESAR LEVANTAMIENTO EN LA NUBE</button>
+        
+        <div id="terminal">Sistema listo. Esperando archivos GPX.</div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+        // TUS LLAVES EXACTAS DE FIREBASE
+        const firebaseConfig = {
+            apiKey: "AIzaSyBAASJamPDpSKU6JZx88oLNQprgwkk3DZs",
+            authDomain: "gpsj-6790c.firebaseapp.com",
+            projectId: "gpsj-6790c",
+            storageBucket: "gpsj-6790c.firebasestorage.app",
+            messagingSenderId: "558545141519",
+            appId: "1:558545141519:web:d21e7360d54db4d84d887a",
+            measurementId: "G-3BQNVX74RS"
+        };
+
+        // Inicializar Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Referencias a la Interfaz Gráfica
+        const loginScreen = document.getElementById('loginScreen');
+        const appScreen = document.getElementById('appScreen');
+        const btnLogin = document.getElementById('btnLogin');
+        const btnLogout = document.getElementById('btnLogout');
+        const loginError = document.getElementById('loginError');
+        const userEmailDisplay = document.getElementById('userEmailDisplay');
+        const btnCalcular = document.getElementById('btnCalcular');
+        const terminal = document.getElementById('terminal');
+
+        // ESCUCHADOR DE SESIÓN (Determina qué pantalla mostrar)
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                // Usuario autenticado, abrir bóveda
+                loginScreen.style.display = 'none';
+                appScreen.style.display = 'block';
+                userEmailDisplay.innerText = user.email;
+            } else {
+                // Nadie autenticado, mostrar login
+                loginScreen.style.display = 'block';
+                appScreen.style.display = 'none';
+            }
+        });
+
+        // FUNCIÓN: INICIAR SESIÓN
+        btnLogin.addEventListener('click', () => {
+            const email = document.getElementById('txtEmail').value;
+            const pass = document.getElementById('txtPassword').value;
+            
+            btnLogin.innerText = "VERIFICANDO...";
+            
+            signInWithEmailAndPassword(auth, email, pass)
+                .then((userCredential) => {
+                    loginError.style.display = 'none';
+                    btnLogin.innerText = "INICIAR SESIÓN";
+                })
+                .catch((error) => {
+                    loginError.style.display = 'block';
+                    loginError.innerText = "Credenciales incorrectas o usuario no existe.";
+                    btnLogin.innerText = "INICIAR SESIÓN";
+                });
+        });
+
+        // FUNCIÓN: CERRAR SESIÓN
+        btnLogout.addEventListener('click', () => {
+            signOut(auth).then(() => {
+                // Borrar campos de contraseña por seguridad
+                document.getElementById('txtPassword').value = "";
+                document.getElementById('txtEmail').value = "";
+            });
+        });
+
+        // FUNCIÓN: SIMULACIÓN DE CÁLCULO (Se conectará a Vercel en la Fase 3)
+        btnCalcular.addEventListener('click', async () => {
+            terminal.innerHTML = "[SISTEMA] Iniciando conexión segura con Servidor Cloud GpsN...\n";
+            terminal.innerHTML += "[AUDITORÍA] Registrando intento de uso en Firestore...\n";
+            
+            try {
+                // Registramos en Firestore quién está procesando datos (Opción A de seguridad)
+                await addDoc(collection(db, "auditoria_procesamiento"), {
+                    usuario: auth.currentUser.email,
+                    fecha: serverTimestamp(),
+                    accion: "Solicitud de Cálculo DGPS"
+                });
+                terminal.innerHTML += "[OK] Auditoría registrada.\n";
+                terminal.innerHTML += "[INFO] Esperando implementación del backend en Vercel (Fase 3).\n";
+            } catch (e) {
+                terminal.innerHTML += `[ERROR FIREBASE] ${e.message}\n`;
+            }
+        });
+    </script>
+</body>
+</html>
