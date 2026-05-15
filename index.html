@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -8,14 +9,11 @@
         :root { --primary: #2c3e50; --accent: #27ae60; --bg: #f4f7f6; --excel: #1d6f42; --danger: #e74c3c; }
         body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
         
-        /* Contenedores Principales */
         #loginScreen { width: 100%; max-width: 400px; padding: 30px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; }
         #appScreen { display: none; width: 100%; max-width: 700px; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin: 20px; }
         
         h1 { color: var(--primary); margin-bottom: 20px; border-bottom: 2px solid var(--accent); padding-bottom: 10px; }
-        h2 { color: var(--primary); font-size: 1.2rem; }
         
-        /* Estilos de Formularios */
         .input-group { margin-bottom: 15px; text-align: left; }
         label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 0.85rem; color: #444; }
         input[type="email"], input[type="password"], input[type="text"], input[type="number"], select, input[type="file"] { 
@@ -26,7 +24,6 @@
         button:hover { opacity: 0.9; }
         .btn-logout { background: var(--danger); width: auto; padding: 8px 15px; float: right; margin-top: 0; font-size: 0.8rem; }
         
-        /* Estilos de la App (Oculta al inicio) */
         .section { background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #ddd; clear: both; }
         .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
         #terminal { background: #111; color: #0f0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 0.85rem; min-height: 200px; overflow-y: auto; margin-top: 15px; white-space: pre-wrap; line-height: 1.4; }
@@ -61,6 +58,7 @@
             
             <label style="margin-top:15px;">2. Archivos Rover de Campo (.gpx)</label>
             <input type="file" id="fileRovers" multiple accept=".gpx">
+            <p style="font-size: 0.75rem; color: #777; margin-top: 5px;">*Los nombres de los puntos se extraerán automáticamente de los archivos GPX.</p>
         </div>
 
         <div class="section">
@@ -69,6 +67,19 @@
                 <input type="number" id="baseE" placeholder="Este (X)">
                 <input type="number" id="baseN" placeholder="Norte (Y)">
                 <input type="number" id="baseZ" placeholder="Cota (Z)">
+            </div>
+            
+            <div class="grid-3" style="margin-top:10px">
+                <div>
+                    <label>Huso UTM</label>
+                    <select id="huso">
+                        <option value="18">18</option>
+                        <option value="19" selected>19</option>
+                        <option value="20">20</option>
+                    </select>
+                </div>
+                <div><label>Bastón Base (m)</label><input type="number" id="alturaBase" value="0.000" step="0.001"></div>
+                <div><label>Bastón Rover (m)</label><input type="number" id="alturaRover" value="0.000" step="0.001"></div>
             </div>
         </div>
 
@@ -80,9 +91,8 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-        import { getFirestore, collection, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
-        // TUS LLAVES EXACTAS DE FIREBASE
         const firebaseConfig = {
             apiKey: "AIzaSyBAASJamPDpSKU6JZx88oLNQprgwkk3DZs",
             authDomain: "gpsj-6790c.firebaseapp.com",
@@ -93,12 +103,11 @@
             measurementId: "G-3BQNVX74RS"
         };
 
-        // Inicializar Firebase
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        // Referencias a la Interfaz Gráfica
+        // UI Elements
         const loginScreen = document.getElementById('loginScreen');
         const appScreen = document.getElementById('appScreen');
         const btnLogin = document.getElementById('btnLogin');
@@ -108,65 +117,97 @@
         const btnCalcular = document.getElementById('btnCalcular');
         const terminal = document.getElementById('terminal');
 
-        // ESCUCHADOR DE SESIÓN (Determina qué pantalla mostrar)
-        onAuthStateChanged(auth, (user) => {
+        // SEGURIDAD: Generar DNI único para este navegador/dispositivo
+        let deviceToken = localStorage.getItem('gpsn_device_token');
+        if (!deviceToken) {
+            deviceToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
+            localStorage.setItem('gpsn_device_token', deviceToken);
+        }
+
+        let sessionListenerUnsubscribe = null;
+
+        // ESCUCHADOR DE ESTADO DE SESIÓN
+        onAuthStateChanged(auth, async (user) => {
             if (user) {
-                // Usuario autenticado, abrir bóveda
                 loginScreen.style.display = 'none';
                 appScreen.style.display = 'block';
                 userEmailDisplay.innerText = user.email;
+
+                try {
+                    // 1. Al iniciar sesión, escribir nuestro DNI en la base de datos
+                    const userRef = doc(db, "sesiones_activas", user.email);
+                    await setDoc(userRef, {
+                        token: deviceToken,
+                        ultimoAcceso: serverTimestamp()
+                    });
+
+                    // 2. Quedarnos "escuchando" ese documento en tiempo real
+                    sessionListenerUnsubscribe = onSnapshot(userRef, (docSnap) => {
+                        if (docSnap.exists()) {
+                            const dbToken = docSnap.data().token;
+                            // Si el token en la nube cambió y ya no es el nuestro... ¡Alguien más entró!
+                            if (dbToken && dbToken !== deviceToken) {
+                                alert("⚠️ CIERRE DE SEGURIDAD: Se ha iniciado sesión con esta cuenta en otro dispositivo.");
+                                signOut(auth);
+                            }
+                        }
+                    });
+                } catch (e) {
+                    console.error("Error al registrar la sesión:", e);
+                }
+
             } else {
-                // Nadie autenticado, mostrar login
+                // Nadie autenticado
                 loginScreen.style.display = 'block';
                 appScreen.style.display = 'none';
+                // Detener el escuchador si existe
+                if (sessionListenerUnsubscribe) {
+                    sessionListenerUnsubscribe();
+                    sessionListenerUnsubscribe = null;
+                }
             }
         });
 
-        // FUNCIÓN: INICIAR SESIÓN
         btnLogin.addEventListener('click', () => {
             const email = document.getElementById('txtEmail').value;
             const pass = document.getElementById('txtPassword').value;
-            
             btnLogin.innerText = "VERIFICANDO...";
             
             signInWithEmailAndPassword(auth, email, pass)
-                .then((userCredential) => {
+                .then(() => {
                     loginError.style.display = 'none';
                     btnLogin.innerText = "INICIAR SESIÓN";
                 })
-                .catch((error) => {
+                .catch(() => {
                     loginError.style.display = 'block';
-                    loginError.innerText = "Credenciales incorrectas o usuario no existe.";
+                    loginError.innerText = "Credenciales incorrectas o usuario no autorizado.";
                     btnLogin.innerText = "INICIAR SESIÓN";
                 });
         });
 
-        // FUNCIÓN: CERRAR SESIÓN
         btnLogout.addEventListener('click', () => {
             signOut(auth).then(() => {
-                // Borrar campos de contraseña por seguridad
                 document.getElementById('txtPassword').value = "";
-                document.getElementById('txtEmail').value = "";
             });
         });
 
-        // FUNCIÓN: SIMULACIÓN DE CÁLCULO (Se conectará a Vercel en la Fase 3)
         btnCalcular.addEventListener('click', async () => {
-            terminal.innerHTML = "[SISTEMA] Iniciando conexión segura con Servidor Cloud GpsN...\n";
-            terminal.innerHTML += "[AUDITORÍA] Registrando intento de uso en Firestore...\n";
+            terminal.innerHTML = "[SISTEMA] Conectando con el Servidor Python en Vercel...\n";
+            terminal.innerHTML += "[INFO] Los nombres de los puntos se extraerán directamente del GPX.\n";
             
+            // Registro de auditoría asíncrono (No bloquea la ejecución si el internet está lento)
             try {
-                // Registramos en Firestore quién está procesando datos (Opción A de seguridad)
-                await addDoc(collection(db, "auditoria_procesamiento"), {
+                const auditRef = doc(db, "auditoria_procesamiento", Date.now().toString());
+                setDoc(auditRef, {
                     usuario: auth.currentUser.email,
                     fecha: serverTimestamp(),
-                    accion: "Solicitud de Cálculo DGPS"
-                });
-                terminal.innerHTML += "[OK] Auditoría registrada.\n";
-                terminal.innerHTML += "[INFO] Esperando implementación del backend en Vercel (Fase 3).\n";
-            } catch (e) {
-                terminal.innerHTML += `[ERROR FIREBASE] ${e.message}\n`;
-            }
+                    accion: "Cálculo Solicitado"
+                }).then(() => {
+                    terminal.innerHTML += "[OK] Auditoría de uso registrada en la nube.\n";
+                }).catch(e => console.error("Auditoría demorada", e));
+            } catch(e) {}
+            
+            terminal.innerHTML += "\n[ESPERA] Preparando Fase 1: Creación del Backend Python en la Nube...\n";
         });
     </script>
 </body>
