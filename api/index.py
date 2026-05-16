@@ -1,3 +1,4 @@
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import utm, math
@@ -8,7 +9,7 @@ app = Flask(__name__)
 CORS(app)
 
 def parse_gpx_memory(file_obj, huso):
-    """Parsea GPX directamente desde la RAM (sin disco duro) y extrae el nombre."""
+    """Parsea GPX directamente desde la RAM y extrae el nombre."""
     pts = {}
     utm_list = []
     nombre_punto = "Punto_Desconocido"
@@ -17,7 +18,6 @@ def parse_gpx_memory(file_obj, huso):
         tree = ET.parse(file_obj)
         root = tree.getroot()
         
-        # Extracción automática del Nombre inyectado por la Colectora
         name_node = root.find('.//{*}metadata/{*}name')
         if name_node is None:
             name_node = root.find('.//{*}trk/{*}name')
@@ -53,16 +53,61 @@ def parse_gpx_memory(file_obj, huso):
         
     return pts, utm_list, nombre_punto
 
-def filtro_kalman_estatico(mediciones, sats, dops):
+def filtro_rts_avanzado(mediciones, sats, dops):
+    """Motor Matemático V2: Rechazo de Anomalías + Filtro Kalman + Suavizado RTS Bidireccional"""
     if not mediciones: return 0.0
-    x_est, P, Q = mediciones[0], 10.0, 1e-5
+    
+    # --- 1. FILTRO ESTADÍSTICO (MAD) ---
+    # Evita que picos falsos de señal (multipath) destruyan el cálculo
+    mediana = sorted(mediciones)[len(mediciones)//2]
+    desviaciones = [abs(m - mediana) for m in mediciones]
+    mad = sorted(desviaciones)[len(desviaciones)//2]
+    mad = max(mad, 0.01) # Protección matemática contra división por cero
+    
+    m_filtradas, s_filtradas, d_filtradas = [], [], []
     for z, sat, dop in zip(mediciones, sats, dops):
-        P += Q
-        R = (20.0 * max(dop, 0.1)) / (sat if sat > 0 else 1)
-        K = P / (P + R)
-        x_est += K * (z - x_est)
-        P *= (1 - K)
-    return x_est
+        if abs(z - mediana) <= 6 * mad: # Tolera variaciones, pero bloquea saltos irreales
+            m_filtradas.append(z)
+            s_filtradas.append(sat)
+            d_filtradas.append(dop)
+            
+    if len(m_filtradas) < len(mediciones) * 0.1:
+        m_filtradas, s_filtradas, d_filtradas = mediciones, sats, dops
+
+    n = len(m_filtradas)
+    if n == 0: return 0.0
+
+    # --- 2. FORWARD PASS (Kalman Estándar) ---
+    x_fwd = [0.0] * n
+    P_fwd = [0.0] * n
+    
+    x_est = m_filtradas[0]
+    P = 10.0
+    Q = 1e-5 # Ruido de proceso mínimo (topografía estática)
+    
+    for i in range(n):
+        z, sat, dop = m_filtradas[i], s_filtradas[i], d_filtradas[i]
+        P_pred = P + Q
+        R = (15.0 * max(dop, 0.1)) / (sat if sat > 0 else 1) # Ponderación geométrica
+        K = P_pred / (P_pred + R)
+        
+        x_est = x_est + K * (z - x_est)
+        P = (1 - K) * P_pred
+        
+        x_fwd[i] = x_est
+        P_fwd[i] = P
+        
+    # --- 3. BACKWARD PASS (Suavizado RTS) ---
+    x_smooth = [0.0] * n
+    x_smooth[-1] = x_fwd[-1]
+    
+    for k in range(n - 2, -1, -1):
+        P_pred_k1 = P_fwd[k] + Q
+        C_k = P_fwd[k] / P_pred_k1 if P_pred_k1 > 0 else 0
+        x_smooth[k] = x_fwd[k] + C_k * (x_smooth[k+1] - x_fwd[k])
+        
+    # El punto cero contiene la retroalimentación de todo el archivo (máxima precisión)
+    return x_smooth[0]
 
 @app.route('/api/procesar', methods=['POST'])
 def procesar():
@@ -75,7 +120,6 @@ def procesar():
         hR = float(request.form.get('alturaRover') or 0.0)
         
         base_file = request.files['base']
-        # Parseo directo en RAM
         base_data, base_utm_all, base_name = parse_gpx_memory(base_file.stream, huso)
         
         avg_bE = sum(p[0] for p in base_utm_all) / len(base_utm_all)
@@ -118,9 +162,10 @@ def procesar():
                 max_rms = max(rmsE, rmsN, rmsZ)
                 qa_status = "[EXCELENTE 🟢]" if max_rms < 0.05 else "[ACEPTABLE 🟡]" if max_rms <= 0.15 else "[DEFICIENTE 🔴]"
 
-                resE = filtro_kalman_estatico(cE, cSat, cDop)
-                resN = filtro_kalman_estatico(cN, cSat, cDop)
-                resZ = filtro_kalman_estatico(cZ, cSat, cDop)
+                # Llama al nuevo motor RTS Avanzado
+                resE = filtro_rts_avanzado(cE, cSat, cDop)
+                resN = filtro_rts_avanzado(cN, cSat, cDop)
+                resZ = filtro_rts_avanzado(cZ, cSat, cDop)
                 
                 dist_base = math.sqrt((resE - bE_know)**2 + (resN - bN_know)**2)
                 avg_dop = sum(cDop)/len(cDop)
