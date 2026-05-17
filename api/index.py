@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import utm, math
@@ -140,10 +139,21 @@ def procesar():
             cE, cN, cZ, cSat, cDop, dE, dN, dZ = [], [], [], [], [], [], [], []
             
             for tR, (rLat, rLon, rEle, rSat, rE_raw, rN_raw, rDop) in rover_data.items():
+                
+                # --- BARRERA 2: LA GUILLOTINA MATEMÁTICA ---
+                # Ignora la época del Rover si el HDOP es pobre
+                if rDop > 4.0:
+                    continue
+
                 cercanos = [t for t in tiempos_base if abs((tR - t).total_seconds()) <= 1.0]
                 if cercanos:
                     tB = min(cercanos, key=lambda t: abs((tR - t).total_seconds()))
-                    _, _, bEle, _, bE_raw, bN_raw, _ = base_data[tB]
+                    # Extraemos también el dop de la base (bDop) al final de la tupla
+                    _, _, bEle, _, bE_raw, bN_raw, bDop = base_data[tB]
+                    
+                    # Ignora la época si la Base tuvo un salto de HDOP > 4.0
+                    if bDop > 4.0:
+                        continue
                     
                     errE, errN, errZ = bE_know - bE_raw, bN_know - bN_raw, bZ_know - (bEle - hB)
                     cE.append(rE_raw + errE)
