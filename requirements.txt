@@ -1,4 +1,5 @@
 Flask==3.0.0
-Flask-Cors==4.0.0
-utm==0.7.0
-
+flask-cors==4.0.0
+gpxpy==1.6.2
+numpy==1.26.4
+pyproj==3.6.1
