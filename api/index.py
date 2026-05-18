@@ -13,9 +13,6 @@ def procesar_archivo_gpx(file_stream):
     for track in gpx.tracks:
         for segment in track.segments:
             for pt in segment.points:
-                if pt.horizontal_dilution and pt.horizontal_dilution > 4.0:
-                    continue 
-                
                 lats.append(pt.latitude)
                 lons.append(pt.longitude)
                 eles.append(pt.elevation)
@@ -30,12 +27,8 @@ def procesar_archivo_gpx(file_stream):
         "epocas_utiles": len(lats)
     }
 
-@app.route('/', defaults={'path': ''}, methods=['POST', 'OPTIONS'])
-@app.route('/<path:path>', methods=['POST', 'OPTIONS'])
-def procesar(path):
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "ok"}), 200
-
+@app.route('/api/procesar_diferencial', methods=['POST'])
+def procesar_diferencial():
     try:
         if 'base_gpx' not in request.files or 'rover_gpx' not in request.files:
             return jsonify({"error": "Faltan archivos GPX"}), 400
@@ -43,26 +36,15 @@ def procesar(path):
         base_file = request.files['base_gpx']
         rover_file = request.files['rover_gpx']
         
-        try:
-            base_oficial_lat = float(request.form.get('base_lat_oficial'))
-        except:
-            base_oficial_lat = 0.0
-            
-        try:
-            base_oficial_lon = float(request.form.get('base_lon_oficial'))
-        except:
-            base_oficial_lon = 0.0
-            
-        try:
-            base_oficial_ele = float(request.form.get('base_ele_oficial'))
-        except:
-            base_oficial_ele = 0.0
+        base_oficial_lat = float(request.form.get('base_lat_oficial'))
+        base_oficial_lon = float(request.form.get('base_lon_oficial'))
+        base_oficial_ele = float(request.form.get('base_ele_oficial'))
 
         datos_base = procesar_archivo_gpx(base_file)
         datos_rover = procesar_archivo_gpx(rover_file)
 
         if not datos_base or not datos_rover:
-            return jsonify({"error": "Archivos vacíos o con mucho ruido"}), 400
+            return jsonify({"error": "Error al procesar archivos"}), 400
 
         error_lat = datos_base['lat_promedio'] - base_oficial_lat
         error_lon = datos_base['lon_promedio'] - base_oficial_lon
