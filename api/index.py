@@ -8,14 +8,12 @@ import math
 app = Flask(__name__)
 CORS(app)
 
-def eliminar_valores_atipicos_iqr(t, x, y, z):
+def eliminar_valores_atipicos_iqr(t, x, y, z, hdop):
     """
-    Filtro Estadístico Espacial (Rango Intercuartílico).
-    Detecta y elimina puntos satelitales con errores por rebote severo (multipath).
+    Filtro Estadístico Espacial (IQR). Ahora sincronizado con el vector HDOP.
     """
-    if len(x) < 4: return t, x, y, z # Muy pocos puntos para estadística
+    if len(x) < 4: return t, x, y, z, hdop
     
-    # Calcular límites IQR para los 3 ejes
     q1_x, q3_x = np.percentile(x, [25, 75]); iqr_x = q3_x - q1_x
     q1_y, q3_y = np.percentile(y, [25, 75]); iqr_y = q3_y - q1_y
     q1_z, q3_z = np.percentile(z, [25, 75]); iqr_z = q3_z - q1_z
@@ -24,42 +22,73 @@ def eliminar_valores_atipicos_iqr(t, x, y, z):
     lim_inf_y, lim_sup_y = q1_y - 1.5 * iqr_y, q3_y + 1.5 * iqr_y
     lim_inf_z, lim_sup_z = q1_z - 1.5 * iqr_z, q3_z + 1.5 * iqr_z
     
-    # Máscara booleana para mantener solo puntos dentro de la tolerancia
     mask = (x >= lim_inf_x) & (x <= lim_sup_x) & \
            (y >= lim_inf_y) & (y <= lim_sup_y) & \
            (z >= lim_inf_z) & (z <= lim_sup_z)
            
-    return t[mask], x[mask], y[mask], z[mask]
+    return t[mask], x[mask], y[mask], z[mask], hdop[mask]
 
-def kalman_filter(mediciones):
+def kalman_filter_3d(e_vals, n_vals, z_vals, hdop_vals):
     """
-    Filtro de Kalman 1D optimizado.
+    Filtro de Kalman Multivariado (3D) con Ponderación de Varianza por HDOP.
     """
-    n = len(mediciones)
-    if n == 0: return 0.0, 0.0
-        
-    x_est = mediciones[0]
-    p_est = 1.0
-    # Calcular varianza como factor de ruido del sensor (R) dinámico
-    r = np.var(mediciones) if n > 1 and np.var(mediciones) > 0 else 1.0 
-    q = 0.001 # Ruido de proceso ajustado (menor incertidumbre teórica)
+    num_puntos = len(e_vals)
+    if num_puntos == 0: 
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # Estado Inicial X: [Este, Norte, Cota]
+    X = np.array([[e_vals[0]], [n_vals[0]], [z_vals[0]]])
     
-    estimaciones = []
-    for z in mediciones:
-        x_pred, p_pred = x_est, p_est + q
-        k = p_pred / (p_pred + r)
-        x_est = x_pred + k * (z - x_pred)
-        p_est = (1 - k) * p_pred
-        estimaciones.append(x_est)
+    # Matriz de Covarianza Inicial P (3x3)
+    P = np.eye(3) * 1.0 
+    
+    # Matriz de Ruido de Proceso Q (Dinámica del modelo estacionario)
+    Q = np.eye(3) * 0.001
+
+    # Identidad
+    I = np.eye(3)
+
+    # Varianzas base de la sesión completa (para escalar con el HDOP)
+    var_e = np.var(e_vals) if num_puntos > 1 and np.var(e_vals) > 0 else 1.0
+    var_n = np.var(n_vals) if num_puntos > 1 and np.var(n_vals) > 0 else 1.0
+    var_z = np.var(z_vals) if num_puntos > 1 and np.var(z_vals) > 0 else 1.0
+
+    estimaciones_e, estimaciones_n, estimaciones_z = [], [], []
+
+    for i in range(num_puntos):
+        # Medición actual (Z_k)
+        Z_meas = np.array([[e_vals[i]], [n_vals[i]], [z_vals[i]]])
         
-    return float(x_est), float(np.std(estimaciones))
+        # Ponderación HDOP: Si el HDOP es alto, el ruido R aumenta drásticamente.
+        factor_hdop = hdop_vals[i] if hdop_vals[i] > 0 else 1.0
+        R = np.diag([var_e, var_n, var_z]) * factor_hdop
+        
+        # 1. Predicción
+        X_pred = X  # Modelo estático: F es la Identidad
+        P_pred = P + Q
+        
+        # 2. Actualización (Cálculo de Ganancia de Kalman K)
+        S = P_pred + R
+        K = np.dot(P_pred, np.linalg.inv(S)) # K = P * S^-1
+        
+        # 3. Estimación Final del Estado y Covarianza
+        X = X_pred + np.dot(K, (Z_meas - X_pred))
+        P = np.dot((I - K), P_pred)
+        
+        # Guardar historial para cálculos de RMS posteriores
+        estimaciones_e.append(X[0, 0])
+        estimaciones_n.append(X[1, 0])
+        estimaciones_z.append(X[2, 0])
+
+    return (float(X[0, 0]), float(X[1, 0]), float(X[2, 0]), 
+            float(np.std(estimaciones_e)), float(np.std(estimaciones_n)), float(np.std(estimaciones_z)))
 
 def procesar_gpx_crudo(file_stream, huso):
     """
-    Extrae la matriz temporal y espacial del archivo GPX y la proyecta a UTM.
+    Extracción vectorial, ahora incluyendo el HDOP de la trama NMEA.
     """
     gpx = gpxpy.parse(file_stream)
-    t_list, lats, lons, eles = [], [], [], []
+    t_list, lats, lons, eles, hdops = [], [], [], [], []
 
     idx = 0
     for track in gpx.tracks:
@@ -69,17 +98,17 @@ def procesar_gpx_crudo(file_stream, huso):
                     lats.append(pt.latitude)
                     lons.append(pt.longitude)
                     eles.append(pt.elevation)
-                    # Extraer tiempo exacto si existe, sino usar índice secuencial
+                    # Extraer HDOP. Si el GPX no lo tiene, forzamos un valor neutro (1.0)
+                    hdops.append(pt.horizontal_dilution if pt.horizontal_dilution is not None else 1.0)
                     t_list.append(pt.time.timestamp() if pt.time else float(idx))
                     idx += 1
 
-    if not lats: return None, None, None, None
+    if not lats: return None, None, None, None, None
 
-    # Proyección rigurosa UTM
     myProj = Proj(f"+proj=utm +zone={huso} +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
     estes, nortes = myProj(np.array(lons), np.array(lats))
     
-    return np.array(t_list), estes, nortes, np.array(eles)
+    return np.array(t_list), estes, nortes, np.array(eles), np.array(hdops)
 
 @app.route('/api/procesar', methods=['POST'])
 def procesar():
@@ -97,55 +126,45 @@ def procesar():
         alturaBase = float(request.form.get('alturaBase', 0))
         alturaRover = float(request.form.get('alturaRover', 0))
 
-        # 1. PARSEAR LA BASE Y CALCULAR MATRIZ DE ERROR TEMPORAL
-        t_base, e_base, n_base, z_base = procesar_gpx_crudo(base_file, huso)
+        # 1. EXTRAER BASE
+        t_base, e_base, n_base, z_base, _ = procesar_gpx_crudo(base_file, huso)
         if t_base is None: return jsonify({"error": "Archivo Base corrupto o sin datos."}), 400
         
-        # El error de la base para cada instante 't'
         err_E_matriz = e_base - baseE_oficial
         err_N_matriz = n_base - baseN_oficial
         err_Z_matriz = (z_base - alturaBase) - baseZ_oficial
 
-        # Error absoluto promedio (Solo para la visualización del usuario)
-        error_E_avg = float(np.mean(err_E_matriz))
-        error_N_avg = float(np.mean(err_N_matriz))
-        error_Z_avg = float(np.mean(err_Z_matriz))
-
+        error_E_avg, error_N_avg, error_Z_avg = float(np.mean(err_E_matriz)), float(np.mean(err_N_matriz)), float(np.mean(err_Z_matriz))
         resultados = []
         
-        # 2. PROCESAR CADA ROVER CON INTERPOLACIÓN TEMPORAL
+        # 2. PROCESAR ROVERS
         for rover_file in rover_files:
-            t_rov, e_rov, n_rov, z_rov = procesar_gpx_crudo(rover_file, huso)
+            t_rov, e_rov, n_rov, z_rov, hdop_rov = procesar_gpx_crudo(rover_file, huso)
             if t_rov is None: continue
             
             puntos_iniciales = len(t_rov)
 
-            # Interpolación Lineal: ¿Cuál era el error de la Base en el microsegundo que el Rover midió?
-            err_E_interpolado = np.interp(t_rov, t_base, err_E_matriz)
-            err_N_interpolado = np.interp(t_rov, t_base, err_N_matriz)
-            err_Z_interpolado = np.interp(t_rov, t_base, err_Z_matriz)
+            # Interpolación Temporal (DGPS)
+            err_E_int = np.interp(t_rov, t_base, err_E_matriz)
+            err_N_int = np.interp(t_rov, t_base, err_N_matriz)
+            err_Z_int = np.interp(t_rov, t_base, err_Z_matriz)
             
-            # Aplicar corrección diferencial punto a punto
-            e_rov_corr = e_rov - err_E_interpolado
-            n_rov_corr = n_rov - err_N_interpolado
-            z_rov_corr = (z_rov - alturaRover) - err_Z_interpolado
+            e_rov_corr = e_rov - err_E_int
+            n_rov_corr = n_rov - err_N_int
+            z_rov_corr = (z_rov - alturaRover) - err_Z_int
             
-            # Limpieza Estadística IQR: Eliminar basura antes de Kalman
-            t_limpio, e_limpio, n_limpio, z_limpio = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr)
+            # Limpieza IQR (ahora arrastra el HDOP para no perder el orden)
+            t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
             
-            puntos_utiles = len(t_limpio)
-            if puntos_utiles == 0: continue # Rover invalidado totalmente por ruido extremo
+            puntos_utiles = len(t_lim)
+            if puntos_utiles == 0: continue
             
-            # Filtro de Kalman Secuencial sobre la nube ya limpia y corregida diferencialmente
-            final_E, rms_e = kalman_filter(e_limpio)
-            final_N, rms_n = kalman_filter(n_limpio)
-            final_Z, rms_z = kalman_filter(z_limpio)
+            # NUEVO MOTOR: Filtro de Kalman 3D Ponderado
+            final_E, final_N, final_Z, rms_e, rms_n, rms_z = kalman_filter_3d(e_lim, n_lim, z_lim, hdop_lim)
             
-            # Cálculo de Línea Base Promedio (para el reporte)
-            base_e_centro, base_n_centro = np.mean(e_base), np.mean(n_base)
-            dist_base = math.sqrt((final_E - base_e_centro)**2 + (final_N - base_n_centro)**2)
+            base_e_cen, base_n_cen = np.mean(e_base), np.mean(n_base)
+            dist_base = math.sqrt((final_E - base_e_cen)**2 + (final_N - base_n_cen)**2)
             
-            # Control de Calidad
             rms_total = rms_e + rms_n + rms_z
             dop_estimado = round((rms_total / 3) + 0.8, 2)
             qa_str = "[ÓPTIMO 🟢]" if rms_total < 1.0 else ("[ACEPTABLE 🟡]" if rms_total < 2.5 else "[DEFICIENTE 🔴]")
@@ -153,7 +172,7 @@ def procesar():
             resultados.append({
                 "roverName": rover_file.filename,
                 "baseName": base_file.filename,
-                "puntos": f"{puntos_utiles}/{puntos_iniciales} (IQR)", # Muestra cuántos sobrevivieron al filtro
+                "puntos": f"{puntos_utiles}/{puntos_iniciales} (IQR)",
                 "csv": {
                     "qaStr": qa_str,
                     "dop": str(dop_estimado),
@@ -176,4 +195,4 @@ def procesar():
         return jsonify({"resultados": resultados}), 200
 
     except Exception as e:
-        return jsonify({"error": f"Error Matemático o de IO: {str(e)}"}), 500
+        return jsonify({"error": f"Fallo Crítico Motor 3D: {str(e)}"}), 500
