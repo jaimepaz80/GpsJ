@@ -26,16 +26,12 @@ def eliminar_valores_atipicos_iqr(t, x, y, z, hdop):
     return t[mask], x[mask], y[mask], z[mask], hdop[mask]
 
 def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
-    """
-    MOTOR ESTÁTICO: Matriz de movimiento congelada, castigo exponencial por HDOP
-    y colapso final por promedio ponderado RTS.
-    """
     num_puntos = len(e_vals)
     if num_puntos == 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     X = np.array([[e_vals[0]], [n_vals[0]], [z_vals[0]]])
     P = np.eye(3) * 1.0
-    Q = np.eye(3) * 0.000001 # Restricción absoluta de movimiento
+    Q = np.eye(3) * 0.000001 
     
     var_e = np.var(e_vals) if num_puntos > 1 and np.var(e_vals) > 0 else 1.0
     var_n = np.var(n_vals) if num_puntos > 1 and np.var(n_vals) > 0 else 1.0
@@ -44,7 +40,6 @@ def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
     X_hist, P_hist, X_pred_hist, P_pred_hist = [], [], [], []
 
     for i in range(num_puntos):
-        # Castigo exponencial del HDOP para el modo estático
         factor_hdop = (hdop_vals[i]**2) if hdop_vals[i] > 0 else 1.0
         R = np.diag([var_e, var_n, var_z]) * factor_hdop
         
@@ -62,13 +57,12 @@ def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
         X_hist.append(X)
         P_hist.append(P)
 
-    X_smoothed, P_smoothed = list(X_hist), list(P_hist)
+    X_smoothed = list(X_hist)
     for k in range(num_puntos - 2, -1, -1):
         P_pred_next_inv = np.linalg.inv(P_pred_hist[k+1])
         C = np.dot(P_hist[k], P_pred_next_inv)
         X_smoothed[k] = X_smoothed[k] + np.dot(C, (X_smoothed[k+1] - X_pred_hist[k+1]))
         
-    # Integración final: Centroide Ponderado por inverso del HDOP
     sum_e, sum_n, sum_z, sum_w = 0, 0, 0, 0
     for k in range(num_puntos):
         w = 1.0 / (hdop_vals[k] + 0.001)
@@ -88,10 +82,6 @@ def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
     return final_E, final_N, final_Z, float(np.std(smoothed_e)), float(np.std(smoothed_n)), float(np.std(smoothed_z))
 
 def filtro_kalman_rts_6d_pv(e_vals, n_vals, z_vals, t_vals, hdop_vals):
-    """
-    MOTOR CINEMÁTICO: Expansión de estado a 6 Dimensiones (Posición y Velocidad)
-    Retorna la trayectoria completa época por época.
-    """
     num_puntos = len(e_vals)
     if num_puntos == 0: return [], [], [], 0.0, 0.0, 0.0
 
@@ -138,13 +128,12 @@ def filtro_kalman_rts_6d_pv(e_vals, n_vals, z_vals, t_vals, hdop_vals):
         X_hist.append(X)
         P_hist.append(P)
 
-    X_smoothed, P_smoothed = list(X_hist), list(P_hist)
+    X_smoothed = list(X_hist)
     for k in range(num_puntos - 2, -1, -1):
         F_next, P_curr = F_hist[k+1], P_hist[k]
         P_pred_next_inv = np.linalg.inv(P_pred_hist[k+1])
         C = np.dot(P_curr, np.dot(F_next.T, P_pred_next_inv))
         X_smoothed[k] = X_smoothed[k] + np.dot(C, (X_smoothed[k+1] - X_pred_hist[k+1]))
-        P_smoothed[k] = P_smoothed[k] + np.dot(C, np.dot((P_smoothed[k+1] - P_pred_hist[k+1]), C.T))
         
     smoothed_e = [float(x[0, 0]) for x in X_smoothed]
     smoothed_n = [float(x[1, 0]) for x in X_smoothed]
@@ -191,6 +180,7 @@ def procesar():
         alturaBase = float(request.form.get('alturaBase', 0))
         alturaRover = float(request.form.get('alturaRover', 0))
 
+        # 1. PARSER EXTRACTOR DE LA BASE
         t_base, e_base, n_base, z_base, _ = procesar_gpx_crudo(base_file, huso)
         if t_base is None: return jsonify({"error": "Archivo Base vacío o corrupto."}), 400
         
@@ -201,12 +191,37 @@ def procesar():
         error_E_avg, error_N_avg, error_Z_avg = float(np.mean(err_E_matriz)), float(np.mean(err_N_matriz)), float(np.mean(err_Z_matriz))
         resultados = []
         
+        # 2. PROCESAMIENTO CON FILTRO DE INTERSECCIÓN TEMPORAL
         for rover_file in rover_files:
             t_rov, e_rov, n_rov, z_rov, hdop_rov = procesar_gpx_crudo(rover_file, huso)
             if t_rov is None: continue
             
             puntos_iniciales = len(t_rov)
 
+            # --- FILTRO DE MÁSCARA CRONOLÓGICA SÍNCRONA (NUEVO) ---
+            inicio_comun = max(t_base[0], t_rov[0])
+            fin_comun = min(t_base[-1], t_rov[-1])
+            
+            # Condición de Quiebre si los conjuntos de tiempo están separados (Cero Solapamiento)
+            if inicio_comun > fin_comun:
+                return jsonify({
+                    "error": f"FALLO CRÍTICO DE SINCRONIZACIÓN: El Rover [{rover_file.filename}] y la Base [{base_file.filename}] no se midieron al mismo tiempo. Verifique los relojes de sus equipos de campo."
+                }), 400
+
+            # Aplicar máscara y recortar de la memoria RAM los datos no comunes
+            mask_rov = (t_rov >= inicio_comun) & (t_rov <= fin_comun)
+            t_rov = t_rov[mask_rov]
+            e_rov = e_rov[mask_rov]
+            n_rov = n_rov[mask_rov]
+            z_rov = z_rov[mask_rov]
+            hdop_rov = hdop_rov[mask_rov]
+            
+            puntos_comunes = len(t_rov)
+            if puntos_comunes == 0:
+                return jsonify({"error": f"FALLO DE INTERSECCIÓN: Cero puntos en común para {rover_file.filename}."}), 400
+            # -----------------------------------------------------
+
+            # Sincronización diferencial exacta punto a punto dentro de la ventana común
             err_E_int = np.interp(t_rov, t_base, err_E_matriz)
             err_N_int = np.interp(t_rov, t_base, err_N_matriz)
             err_Z_int = np.interp(t_rov, t_base, err_Z_matriz)
@@ -215,12 +230,13 @@ def procesar():
             n_rov_corr = n_rov - err_N_int
             z_rov_corr = (z_rov - alturaRover) - err_Z_int
             
+            # Filtro Estadístico IQR
             t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
             
             puntos_utiles = len(t_lim)
             if puntos_utiles == 0: continue
             
-            # BIFURCACIÓN DE MOTORES MATEMÁTICOS
+            # Selección Automática del Motor Matemático
             if modo == 'estatico':
                 final_E, final_N, final_Z, rms_e, rms_n, rms_z = filtro_kalman_estatico_estricto(e_lim, n_lim, z_lim, hdop_lim)
                 track_data = [{ "e": final_E, "n": final_N, "z": final_Z, "epoca": "Estático" }]
@@ -240,7 +256,7 @@ def procesar():
                 "roverName": rover_file.filename,
                 "baseName": base_file.filename,
                 "modo": modo.upper(),
-                "puntos": f"{puntos_utiles}/{puntos_iniciales} (IQR+RTS)",
+                "puntos": f"{puntos_utiles}/{puntos_iniciales} (Síncronos)",
                 "track": track_data,
                 "csv": {
                     "qaStr": qa_str,
