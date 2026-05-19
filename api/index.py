@@ -1,494 +1,297 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ColectoraGps - Topografía GNSS v4.2</title>
-    <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" content="#2c3e50">
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import gpxpy
+import numpy as np
+from pyproj import Proj
+import math
+
+app = Flask(__name__)
+CORS(app)
+
+def eliminar_valores_atipicos_iqr(t, x, y, z, hdop):
+    """
+    Filtro IQR Asimétrico: Tolerancia planimétrica normal (1.5), rigidez altimétrica extrema (1.0).
+    """
+    if len(x) < 4: return t, x, y, z, hdop
     
-    <style>
-        :root { --primary: #2c3e50; --accent: #e74c3c; --active: #27ae60; --bg: #ecf0f1; --text: #333; }
-        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); padding: 15px; display: flex; justify-content: center; margin: 0; }
-        .app-container { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 500px; width: 100%; text-align: center; }
-        h1 { color: var(--primary); font-size: 1.4rem; margin-top: 0; border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+    q1_x, q3_x = np.percentile(x, [25, 75]); iqr_x = q3_x - q1_x
+    q1_y, q3_y = np.percentile(y, [25, 75]); iqr_y = q3_y - q1_y
+    q1_z, q3_z = np.percentile(z, [25, 75]); iqr_z = q3_z - q1_z
+    
+    lim_inf_x, lim_sup_x = q1_x - 1.5 * iqr_x, q3_x + 1.5 * iqr_x
+    lim_inf_y, lim_sup_y = q1_y - 1.5 * iqr_y, q3_y + 1.5 * iqr_y
+    # Castigo inicial: Recorte estricto de picos verticales
+    lim_inf_z, lim_sup_z = q1_z - 1.0 * iqr_z, q3_z + 1.0 * iqr_z
+    
+    mask = (x >= lim_inf_x) & (x <= lim_sup_x) & \
+           (y >= lim_inf_y) & (y <= lim_sup_y) & \
+           (z >= lim_inf_z) & (z <= lim_sup_z)
+           
+    return t[mask], x[mask], y[mask], z[mask], hdop[mask]
+
+def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
+    """
+    Motor Kalman Asimétrico: Desacopla la Cota (Z) para someterla a extrema penalización de varianza.
+    """
+    num_puntos = len(e_vals)
+    if num_puntos == 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # 1. Anclaje Robusto: Z inicia en la mediana, no en el primer punto inestable
+    z_median = np.median(z_vals)
+    X = np.array([[e_vals[0]], [n_vals[0]], [z_median]])
+    P = np.eye(3) * 1.0
+    
+    # 2. Q Asimétrico: Congelamos el movimiento vertical 100 veces más que el horizontal
+    Q = np.diag([0.000001, 0.000001, 0.00000001]) 
+    
+    var_e = np.var(e_vals) if num_puntos > 1 and np.var(e_vals) > 0 else 1.0
+    var_n = np.var(n_vals) if num_puntos > 1 and np.var(n_vals) > 0 else 1.0
+    
+    # 3. R Asimétrico: Inflamos artificialmente la desconfianza en el hardware para Z (x10)
+    var_z_base = np.var(z_vals) if num_puntos > 1 and np.var(z_vals) > 0 else 1.0
+    var_z = var_z_base * 10.0 
+
+    X_hist, P_hist, X_pred_hist, P_pred_hist = [], [], [], []
+
+    for i in range(num_puntos):
+        factor_hdop = (hdop_vals[i]**2) if hdop_vals[i] > 0 else 1.0
         
-        .whatsapp-banner { margin-bottom: 20px; padding: 15px; background-color: #f0fdf4; border: 1px solid #25d366; border-radius: 8px; font-size: 0.85rem; color: #2c3e50; text-align: center; }
-        .whatsapp-btn { display: inline-block; margin-top: 10px; background-color: #25d366; color: white; padding: 10px 20px; text-decoration: none; font-weight: bold; border-radius: 5px; transition: 0.3s; font-size: 0.9rem; }
-        .whatsapp-btn:hover { background-color: #128c7e; }
-
-        .input-group { text-align: left; margin-bottom: 15px; }
-        label { font-weight: bold; font-size: 0.85rem; color: #555; display: block; margin-bottom: 5px; }
-        input[type="text"], select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }
-
-        .main-timer { font-size: 3.5rem; font-weight: bold; color: var(--primary); margin: 10px 0; font-family: monospace; letter-spacing: 2px;}
-
-        .status-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 0.85rem; margin-bottom: 15px; background: #ddd; color: #555; transition: 0.3s; width: 80%;}
-        .status-recording { animation: pulse 2s infinite; }
+        # Penalización vertical dinámica por distanciamiento a la mediana
+        desviacion_z = abs(z_vals[i] - z_median)
+        factor_z = factor_hdop * (1.0 + desviacion_z)
         
-        .data-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #eee; text-align: left; margin-bottom: 15px; font-size: 0.9rem; }
-        .data-row { display: flex; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px dashed #ccc; padding-bottom: 4px; }
-        .data-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-        .label { font-weight: bold; color: var(--primary); }
-        .value { font-family: monospace; font-size: 1rem; color: #2980b9; }
-
-        .panel-promedio { display: none; background: #e8f8f5; border: 2px solid var(--active); padding: 15px; border-radius: 8px; text-align: left; margin-bottom: 15px; font-size: 0.95rem; }
-        .panel-promedio h3 { margin: 0 0 10px 0; color: var(--active); font-size: 1.1rem; text-align: center; border-bottom: 1px solid #a3e4d7; padding-bottom: 5px;}
-        .prom-val { font-family: monospace; font-weight: bold; color: #117a65; font-size: 1.1rem;}
+        R = np.diag([var_e * factor_hdop, var_n * factor_hdop, var_z * factor_z])
         
-        .panel-libreta { display: none; background: #ebf5fb; border: 2px solid #3498db; padding: 15px; border-radius: 8px; text-align: left; margin-bottom: 15px; }
+        X_pred, P_pred = X, P + Q
+        X_pred_hist.append(X_pred)
+        P_pred_hist.append(P_pred)
         
-        button { width: 100%; padding: 14px; font-size: 0.95rem; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; transition: 0.3s; margin-bottom: 10px; }
-        #btnToggle { background: var(--primary); color: white; }
-        #btnToggle.recording { background: var(--accent); }
+        Z_meas = np.array([[e_vals[i]], [n_vals[i]], [z_vals[i]]])
+        S = P_pred + R
+        K = np.dot(P_pred, np.linalg.pinv(S))
         
-        .action-buttons { display: none; gap: 10px; margin-top: 10px; }
-        .btn-half { width: 50%; padding: 12px; font-size: 0.85rem;}
-        #btnExport { background: #34495e; color: white; margin-bottom: 0;}
-        #btnShare { background: #27ae60; color: white; margin-bottom: 0;}
-        #btnDiscard { background: #e74c3c; color: white; display: none; margin-top: 10px; }
-
-        #log { background: #111; color: #0f0; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 0.75rem; height: 100px; overflow-y: auto; text-align: left; margin-top: 15px; }
-
-        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(39, 174, 96, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(39, 174, 96, 0); } 100% { box-shadow: 0 0 0 0 rgba(39, 174, 96, 0); } }
-    </style>
-</head>
-<body>
-    <div class="app-container">
-        <h1>ColectoraGps Pro</h1>
-
-        <div class="whatsapp-banner">
-            <p style="margin: 0 0 8px 0; font-size: 0.95rem; color: #1e8449;"><strong>Servicios de Procesamiento Diferencial (GpsJ)</strong></p>
-            <p style="margin: 0; line-height: 1.4;">Uso libre. Para post-procesamiento geodésico avanzado acoplado en la nube con el Motor GpsJ, contácteme.</p>
-            <a href="https://wa.me/584121043327" target="_blank" class="whatsapp-btn">💬 Contactar por WhatsApp</a>
-        </div>
+        X = X_pred + np.dot(K, (Z_meas - X_pred))
+        P = np.dot((np.eye(3) - K), P_pred)
         
-        <div class="input-group">
-            <label>Identificador del Punto / Trayectoria:</label>
-            <input type="text" id="puntoName" placeholder="Ejemplo: R-1, Canal-Sur..." autocomplete="off">
-        </div>
+        X_hist.append(X)
+        P_hist.append(P)
 
-        <div class="input-group">
-            <label>Modo de Medición:</label>
-            <select id="modoMedicion" style="background-color: #f4f6f7; border-color: #bdc3c7;">
-                <option value="estatico" selected>Estático (Filtro Espacial Activado)</option>
-                <option value="cinematico">Cinemático (Rastreo Libre sin Filtro)</option>
-            </select>
-        </div>
-
-        <div id="mainTimer" class="main-timer">00:00</div>
-        <div id="statusBadge" class="status-badge">ESPERANDO INICIO...</div>
-
-        <div id="panelPromedio" class="panel-promedio">
-            <h3 id="tituloPromedio">📍 PROMEDIO AUTÓNOMO (UTM)</h3>
-            <div class="data-row"><span class="label">Norte (Y):</span> <span id="promN" class="prom-val">---</span></div>
-            <div class="data-row"><span class="label">Este (X):</span> <span id="promE" class="prom-val">---</span></div>
-            <div class="data-row"><span class="label">Cota (Z):</span> <span id="promZ" class="prom-val">---</span></div>
-            <div class="data-row"><span class="label">Huso/Hem:</span> <span id="promHuso" class="prom-val" style="color:#333;">---</span></div>
-            <div class="data-row"><span class="label" style="color:var(--accent);">Dispersión (RMS):</span> <span id="promAcc" class="prom-val" style="color:var(--accent);">---</span></div>
-        </div>
-
-        <div class="data-panel">
-            <div class="data-row"><span class="label" style="color:#2980b9;">Norte (Y) Vivo:</span> <span id="valNorte" class="value" style="color:#2980b9;">---</span></div>
-            <div class="data-row"><span class="label" style="color:#2980b9;">Este (X) Vivo:</span> <span id="valEste" class="value" style="color:#2980b9;">---</span></div>
-            <div class="data-row"><span class="label">Cota (Z):</span> <span id="valEle" class="value">--- m</span></div>
-            <div class="data-row"><span class="label">Precisión HDOP:</span> <span id="valAcc" class="value">---</span></div>
-            <div class="data-row"><span class="label">Épocas Grabadas:</span> <span id="valPts" class="value" style="color:var(--active); font-weight:bold;">0</span></div>
-            <div class="data-row"><span class="label" style="color:var(--accent);">Épocas Rechazadas:</span> <span id="valRechazados" class="value" style="color:var(--accent); font-weight:bold;">0</span></div>
-        </div>
-
-        <button id="btnToggle" onclick="toggleRecording()">INICIAR LEVANTAMIENTO</button>
+    X_smoothed = list(X_hist)
+    for k in range(num_puntos - 2, -1, -1):
+        P_pred_next_inv = np.linalg.pinv(P_pred_hist[k+1])
+        C = np.dot(P_hist[k], P_pred_next_inv)
+        X_smoothed[k] = X_smoothed[k] + np.dot(C, (X_smoothed[k+1] - X_pred_hist[k+1]))
         
-        <div id="actionButtons" class="action-buttons">
-            <button id="btnExport" class="btn-half" onclick="exportGPX(false)">💾 GPX PARA NUBE</button>
-            <button id="btnShare" class="btn-half" onclick="exportGPX(true)">📲 COMPARTIR GPX</button>
-        </div>
-        <button id="btnDiscard" onclick="descartar()">🗑️ DESCARTAR MEDICIÓN ACTUAL</button>
+    sum_e, sum_n, sum_z, sum_w, sum_w_z = 0, 0, 0, 0, 0
+    for k in range(num_puntos):
+        w = 1.0 / (hdop_vals[k] + 0.001)
+        # 4. Colapso Final: El peso de Z decae si intenta separarse del centroide histórico
+        w_z = w / (1.0 + abs(X_smoothed[k][2,0] - z_median))
+        
+        sum_e += X_smoothed[k][0,0] * w
+        sum_n += X_smoothed[k][1,0] * w
+        sum_z += X_smoothed[k][2,0] * w_z
+        sum_w += w
+        sum_w_z += w_z
+        
+    final_E = sum_e / sum_w
+    final_N = sum_n / sum_w
+    final_Z = sum_z / sum_w_z
 
-        <div id="panelLibreta" class="panel-libreta">
-            <div class="data-row"><span class="label" style="color:#2980b9;">Puntos en Libreta:</span> <span id="valMemoria" class="value" style="font-weight:bold;">0</span></div>
+    smoothed_e = np.array([x[0,0] for x in X_smoothed])
+    smoothed_n = np.array([x[1,0] for x in X_smoothed])
+    smoothed_z = np.array([x[2,0] for x in X_smoothed])
+    
+    return final_E, final_N, final_Z, float(np.std(smoothed_e)), float(np.std(smoothed_n)), float(np.std(smoothed_z))
+
+def filtro_kalman_rts_6d_pv(e_vals, n_vals, z_vals, t_vals, hdop_vals):
+    num_puntos = len(e_vals)
+    if num_puntos == 0: return [], [], [], 0.0, 0.0, 0.0
+
+    X = np.array([[e_vals[0]], [n_vals[0]], [z_vals[0]], [0.0], [0.0], [0.0]])
+    P = np.eye(6) * 1.0
+    
+    X_hist, P_hist, X_pred_hist, P_pred_hist, F_hist = [], [], [], [], []
+    H = np.zeros((3, 6))
+    H[0, 0], H[1, 1], H[2, 2] = 1.0, 1.0, 1.0
+    I = np.eye(6)
+    
+    var_e = np.var(e_vals) if num_puntos > 1 and np.var(e_vals) > 0 else 1.0
+    var_n = np.var(n_vals) if num_puntos > 1 and np.var(n_vals) > 0 else 1.0
+    var_z = np.var(z_vals) if num_puntos > 1 and np.var(z_vals) > 0 else 1.0
+
+    for i in range(num_puntos):
+        dt = t_vals[i] - t_vals[i-1] if i > 0 else 1.0
+        if dt <= 0: dt = 1.0
+        
+        F = np.eye(6)
+        F[0, 3], F[1, 4], F[2, 5] = dt, dt, dt
+        
+        Q = np.zeros((6, 6))
+        np.fill_diagonal(Q[:3, :3], 0.001 * dt) 
+        np.fill_diagonal(Q[3:, 3:], 0.01 * dt)
+        
+        factor_hdop = hdop_vals[i] if hdop_vals[i] > 0 else 1.0
+        R = np.diag([var_e, var_n, var_z]) * factor_hdop
+        
+        X_pred = np.dot(F, X)
+        P_pred = np.dot(F, np.dot(P, F.T)) + Q
+        
+        X_pred_hist.append(X_pred)
+        P_pred_hist.append(P_pred)
+        F_hist.append(F)
+        
+        Z_meas = np.array([[e_vals[i]], [n_vals[i]], [z_vals[i]]])
+        y = Z_meas - np.dot(H, X_pred)
+        S = np.dot(H, np.dot(P_pred, H.T)) + R
+        K = np.dot(P_pred, np.dot(H.T, np.linalg.pinv(S))) 
+        
+        X = X_pred + np.dot(K, y)
+        P = np.dot((I - np.dot(K, H)), P_pred)
+        X_hist.append(X)
+        P_hist.append(P)
+
+    X_smoothed = list(X_hist)
+    for k in range(num_puntos - 2, -1, -1):
+        F_next, P_curr = F_hist[k+1], P_hist[k]
+        P_pred_next_inv = np.linalg.pinv(P_pred_hist[k+1])
+        C = np.dot(P_curr, np.dot(F_next.T, P_pred_next_inv))
+        X_smoothed[k] = X_smoothed[k] + np.dot(C, (X_smoothed[k+1] - X_pred_hist[k+1]))
+        
+    smoothed_e = [float(x[0, 0]) for x in X_smoothed]
+    smoothed_n = [float(x[1, 0]) for x in X_smoothed]
+    smoothed_z = [float(x[2, 0]) for x in X_smoothed]
+    
+    return smoothed_e, smoothed_n, smoothed_z, float(np.std(smoothed_e)), float(np.std(smoothed_n)), float(np.std(smoothed_z))
+
+def procesar_gpx_crudo(file_stream, huso):
+    gpx = gpxpy.parse(file_stream)
+    t_list, lats, lons, eles, hdops = [], [], [], [], []
+
+    idx = 0
+    for track in gpx.tracks:
+        for segment in track.segments:
+            for pt in segment.points:
+                if pt.elevation is not None:
+                    lats.append(pt.latitude)
+                    lons.append(pt.longitude)
+                    eles.append(pt.elevation)
+                    hdops.append(pt.horizontal_dilution if pt.horizontal_dilution is not None else 1.0)
+                    t_list.append(pt.time.timestamp() if pt.time else float(idx))
+                    idx += 1
+
+    if not lats: return None, None, None, None, None
+
+    myProj = Proj(f"+proj=utm +zone={huso} +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+    estes, nortes = myProj(np.array(lons), np.array(lats))
+    return np.array(t_list), estes, nortes, np.array(eles), np.array(hdops)
+
+@app.route('/api/procesar', methods=['POST'])
+def procesar():
+    try:
+        if 'base' not in request.files or 'rovers' not in request.files:
+            return jsonify({"error": "No se detectaron archivos GPX."}), 400
+
+        base_file = request.files['base']
+        rover_files = request.files.getlist('rovers')
+        modo = request.form.get('modo', 'estatico')
+        
+        baseE_oficial = float(request.form.get('baseE', 0))
+        baseN_oficial = float(request.form.get('baseN', 0))
+        baseZ_oficial = float(request.form.get('baseZ', 0))
+        huso = int(request.form.get('huso', 19))
+        alturaBase = float(request.form.get('alturaBase', 0))
+        alturaRover = float(request.form.get('alturaRover', 0))
+
+        t_base, e_base, n_base, z_base, _ = procesar_gpx_crudo(base_file, huso)
+        if t_base is None: return jsonify({"error": "Archivo Base vacío o corrupto."}), 400
+        
+        err_E_matriz = e_base - baseE_oficial
+        err_N_matriz = n_base - baseN_oficial
+        err_Z_matriz = (z_base - alturaBase) - baseZ_oficial
+
+        error_E_avg, error_N_avg, error_Z_avg = float(np.mean(err_E_matriz)), float(np.mean(err_N_matriz)), float(np.mean(err_Z_matriz))
+        resultados = []
+        
+        for rover_file in rover_files:
+            t_rov, e_rov, n_rov, z_rov, hdop_rov = procesar_gpx_crudo(rover_file, huso)
+            if t_rov is None: continue
             
-            <div style="display: flex; gap: 10px; margin-top: 15px;">
-                <button onclick="descargarExcel()" style="margin:0; background: #27ae60; font-size:0.85rem;">📊 CSV (EXCEL)</button>
-                <button onclick="descargarDXF()" style="margin:0; background: #8e44ad; color: white; font-size:0.85rem;">📐 DXF (CAD)</button>
-            </div>
-            <button onclick="vaciarLibreta()" style="background: #e74c3c; margin-top: 10px; font-size:0.85rem;">🗑️ VACIAR LIBRETA</button>
-        </div>
+            puntos_iniciales = len(t_rov)
 
-        <div id="log">Sistema Web listo. Asigne un nombre al punto y presione Iniciar.</div>
-    </div>
-
-    <script>
-        let watchId = null;
-        let loopInterval = null; // CORRECCIÓN AUDITORÍA: Bucle activo de interrogación a 1Hz
-        let isRecording = false;
-        let trackpoints = [];
-        let currentPuntoName = "Punto_GPS";
-        let puntosAlmacenados = [];
-        let timerInterval = null;
-        let timeSeconds = 0;
-        let rejectedCount = 0;
-        let wakeLock = null;
-        
-        // Memoria caché del último punto vivo entregado por el hardware
-        let cacheUltimaPosicion = null;
-
-        const btnToggle = document.getElementById('btnToggle');
-        const actionButtons = document.getElementById('actionButtons');
-        const btnDiscard = document.getElementById('btnDiscard');
-        const statusBadge = document.getElementById('statusBadge');
-        const mainTimer = document.getElementById('mainTimer');
-        const logPanel = document.getElementById('log');
-        const inputName = document.getElementById('puntoName');
-        const modoMedicion = document.getElementById('modoMedicion');
-        const panelPromedio = document.getElementById('panelPromedio');
-        const panelLibreta = document.getElementById('panelLibreta');
-        const tituloPromedio = document.getElementById('tituloPromedio');
-
-        function log(msg) {
-            logPanel.innerHTML += `\n> ${msg}`;
-            logPanel.scrollTop = logPanel.scrollHeight;
-        }
-
-        async function activarWakeLock() {
-            try {
-                if ('wakeLock' in navigator) {
-                    wakeLock = await navigator.wakeLock.request('screen');
-                    log("WakeLock Activo: Pantalla fijada contra suspensiones.");
-                    document.addEventListener('visibilitychange', async () => {
-                        if (wakeLock !== null && document.visibilityState === 'visible') {
-                            wakeLock = await navigator.wakeLock.request('screen');
-                        }
-                    });
-                }
-            } catch (err) { console.log("WakeLock falló pasivamente."); }
-        }
-
-        function desactivarWakeLock() {
-            if (wakeLock !== null) {
-                wakeLock.release().then(() => { wakeLock = null; });
-            }
-        }
-
-        function latLonToUTM(lat, lon) {
-            const a = 6378137.0;
-            const eccSquared = 0.00669438;
-            const k0 = 0.9996;
-            const zone = Math.floor((lon + 180) / 6) + 1;
-            const lonOrigin = (zone - 1) * 6 - 180 + 3;
-            const lonOriginRad = lonOrigin * Math.PI / 180.0;
-            const latRad = lat * Math.PI / 180.0;
-            const lonRad = lon * Math.PI / 180.0;
-            const eccPrimeSquared = eccSquared / (1 - eccSquared);
-            const N = a / Math.sqrt(1 - eccSquared * Math.sin(latRad) * Math.sin(latRad));
-            const T = Math.tan(latRad) * Math.tan(latRad);
-            const C = eccPrimeSquared * Math.cos(latRad) * Math.cos(latRad);
-            const A = Math.cos(latRad) * (lonRad - lonOriginRad);
-            const M = a * ((1 - eccSquared / 4 - 3 * eccSquared * eccSquared / 64 - 5 * Math.pow(eccSquared, 3) / 256) * latRad
-                - (3 * eccSquared / 8 + 3 * eccSquared * eccSquared / 32 + 45 * Math.pow(eccSquared, 3) / 1024) * Math.sin(2 * latRad)
-                + (15 * eccSquared * eccSquared / 256 + 45 * Math.pow(eccSquared, 3) / 1024) * Math.sin(4 * latRad)
-                - (35 * Math.pow(eccSquared, 3) / 3072) * Math.sin(6 * latRad));
-            const UTMEasting = (k0 * N * (A + (1 - T + C) * Math.pow(A, 3) / 6 + (5 - 18 * T + T * T + 72 * C - 58 * eccPrimeSquared) * Math.pow(A, 5) / 120) + 500000.0);
-            let UTMNorthing = (k0 * (M + N * Math.tan(latRad) * (A * A / 2 + (5 - T + 9 * C + 4 * C * C) * Math.pow(A, 4) / 24 + (61 - 58 * T + T * T + 600 * C - 330 * eccPrimeSquared) * Math.pow(A, 6) / 720)));
-            if (lat < 0) UTMNorthing += 10000000.0; 
-            return { e: UTMEasting, n: UTMNorthing, zone: zone, hemi: lat >= 0 ? 'N' : 'S' };
-        }
-
-        function getMedian(arr) {
-            const sorted = [...arr].sort((a, b) => a - b);
-            const half = Math.floor(sorted.length / 2);
-            return sorted.length % 2 ? sorted[half] : (sorted[half - 1] + sorted[half]) / 2.0;
-        }
-
-        // Filtro MAD Estático
-        function filterMAD(values) {
-            if (values.length === 0) return [];
-            const median = getMedian(values);
-            const devs = values.map(v => Math.abs(v - median));
-            let mad = getMedian(devs);
-            if (mad < 0.000001) mad = 0.000001; 
-            return values.filter(v => Math.abs(v - median) <= 6 * mad);
-        }
-
-        function calcularPromedioRobusto() {
-            if (trackpoints.length === 0) return;
-
-            let modo = modoMedicion.value;
+            inicio_comun = max(t_base[0], t_rov[0])
+            fin_comun = min(t_base[-1], t_rov[-1])
             
-            // CORRECCIÓN AUDITORÍA: El cálculo del promedio se ejecuta sobre coordenadas planas UTM reales,
-            // no sobre aproximaciones de grados esféricos.
-            let utm_e_vals = trackpoints.map(p => { let u = latLonToUTM(parseFloat(p.lat), parseFloat(p.lon)); return u.e; });
-            let utm_n_vals = trackpoints.map(p => { let u = latLonToUTM(parseFloat(p.lat), parseFloat(p.lon)); return u.n; });
-            let eles = trackpoints.map(p => parseFloat(p.ele));
+            if inicio_comun > fin_comun:
+                return jsonify({
+                    "error": f"FALLO CRÍTICO DE SINCRONIZACIÓN: El Rover [{rover_file.filename}] y la Base [{base_file.filename}] no poseen ventanas de tiempo en común."
+                }), 400
 
-            let fE = utm_e_vals;
-            let fN = utm_n_vals;
-            let fZ = eles;
-
-            if (modo === 'estatico') {
-                fE = filterMAD(utm_e_vals);
-                fN = filterMAD(utm_n_vals);
-                fZ = filterMAD(eles);
-                
-                if(fE.length === 0) fE = utm_e_vals;
-                if(fN.length === 0) fN = utm_n_vals;
-                if(fZ.length === 0) fZ = eles;
-                
-                tituloPromedio.innerText = "📍 PROMEDIO AUTÓNOMO (ESTÁTICO)";
-            } else {
-                tituloPromedio.innerText = "📍 CENTROIDE DE TRAYECTORIA (CINEMÁTICO)";
-            }
-
-            let finalE = fE.reduce((a, b) => a + b, 0) / fE.length;
-            let finalN = fN.reduce((a, b) => a + b, 0) / fN.length;
-            let finalZ = fZ.reduce((a, b) => a + b, 0) / fZ.length;
-
-            // Extraer Huso de la primera época útil
-            let muestraUTM = latLonToUTM(parseFloat(trackpoints[0].lat), parseFloat(trackpoints[0].lon));
-
-            // Calcular Desviación Estándar (RMS) Plana Real
-            let sumSq = 0;
-            for(let i=0; i<utm_e_vals.length; i++) {
-                let dE = utm_e_vals[i] - finalE;
-                let dN = utm_n_vals[i] - finalN;
-                sumSq += (dE*dE + dN*dN);
-            }
-            let rms = Math.sqrt(sumSq / trackpoints.length);
-
-            panelPromedio.style.display = 'block';
-            document.getElementById('promN').innerText = finalN.toFixed(3);
-            document.getElementById('promE').innerText = finalE.toFixed(3);
-            document.getElementById('promZ').innerText = finalZ.toFixed(3) + " m";
-            document.getElementById('promHuso').innerText = muestraUTM.zone + " " + muestraUTM.hemi;
-            document.getElementById('promAcc').innerText = "± " + rms.toFixed(2) + " m";
-
-            puntosAlmacenados.push({
-                nombre: currentPuntoName,
-                norte: finalN.toFixed(3),
-                este: finalE.toFixed(3),
-                cota: finalZ.toFixed(3),
-                huso: muestraUTM.zone + muestraUTM.hemi,
-                rms: rms.toFixed(3),
-                epocas: trackpoints.length
-            });
+            mask_rov = (t_rov >= inicio_comun) & (t_rov <= fin_comun)
+            t_rov = t_rov[mask_rov]
+            e_rov = e_rov[mask_rov]
+            n_rov = n_rov[mask_rov]
+            z_rov = z_rov[mask_rov]
+            hdop_rov = hdop_rov[mask_rov]
             
-            document.getElementById('valMemoria').innerText = puntosAlmacenados.length;
-            panelLibreta.style.display = 'block';
-        }
+            puntos_comunes = len(t_rov)
+            if puntos_comunes == 0:
+                return jsonify({"error": f"FALLO DE INTERSECCIÓN: Cero puntos síncronos para {rover_file.filename}."}), 400
 
-        function toggleRecording() {
-            if (!isRecording) {
-                if (!navigator.geolocation) { alert("Error de hardware."); return; }
-                
-                let nameVal = inputName.value.trim();
-                if(!nameVal) { alert("Asigne un nombre."); inputName.focus(); return; }
-                currentPuntoName = nameVal;
+            err_E_int = np.interp(t_rov, t_base, err_E_matriz)
+            err_N_int = np.interp(t_rov, t_base, err_N_matriz)
+            err_Z_int = np.interp(t_rov, t_base, err_Z_matriz)
+            
+            e_rov_corr = e_rov - err_E_int
+            n_rov_corr = n_rov - err_N_int
+            z_rov_corr = (z_rov - alturaRover) - err_Z_int
+            
+            t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
+            
+            puntos_utiles = len(t_lim)
+            if puntos_utiles == 0: continue
+            
+            if modo == 'estatico':
+                final_E, final_N, final_Z, rms_e, rms_n, rms_z = filtro_kalman_estatico_estricto(e_lim, n_lim, z_lim, hdop_lim)
+                track_data = [{ "e": final_E, "n": final_N, "z": final_Z, "epoca": "Estático" }]
+            else:
+                track_E, track_N, track_Z, rms_e, rms_n, rms_z = filtro_kalman_rts_6d_pv(e_lim, n_lim, z_lim, t_lim, hdop_lim)
+                final_E, final_N, final_Z = track_E[-1], track_N[-1], track_Z[-1]
+                track_data = [{ "e": track_E[i], "n": track_N[i], "z": track_Z[i], "epoca": i+1 } for i in range(len(track_E))]
+            
+            base_e_cen, base_n_cen = np.mean(e_base), np.mean(n_base)
+            dist_base = math.sqrt((final_E - base_e_cen)**2 + (final_N - base_n_cen)**2)
+            
+            rms_total = rms_e + rms_n + rms_z
+            dop_estimado = round((rms_total / 3) + 0.8, 2)
+            qa_str = "[ÓPTIMO 🟢]" if rms_total < 0.8 else ("[ACEPTABLE 🟡]" if rms_total < 2.0 else "[DEFICIENTE 🔴]")
 
-                trackpoints = [];
-                timeSeconds = 0;
-                rejectedCount = 0;
-                cacheUltimaPosicion = null;
-                
-                document.getElementById('valPts').innerText = "0";
-                document.getElementById('valRechazados').innerText = "0";
-                mainTimer.innerText = "00:00";
-                
-                actionButtons.style.display = 'none';
-                btnDiscard.style.display = 'none';
-                inputName.disabled = true; 
-                modoMedicion.disabled = true; 
-                
-                activarWakeLock();
-                
-                // Reloj de Cronómetro General
-                timerInterval = setInterval(() => {
-                    timeSeconds++;
-                    let m = Math.floor(timeSeconds / 60).toString().padStart(2, '0');
-                    let s = (timeSeconds % 60).toString().padStart(2, '0');
-                    mainTimer.innerText = `${m}:${s}`;
-                }, 1000);
-                
-                // Inicializar canal pasivo de actualización de hardware
-                const options = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
-                watchId = navigator.geolocation.watchPosition((pos) => { cacheUltimaPosicion = pos; }, (err) => { log(`Err Hardware: ${err.message}`); }, options);
-                
-                // CORRECCIÓN DE AUDITORÍA: Bucle activo de inyección forzada a 1Hz exacto. 
-                // Elimina la latencia estática del chip.
-                loopInterval = setInterval(() => {
-                    if (cacheUltimaPosicion !== null) {
-                        procesarNodoTemporal(cacheUltimaPosicion);
-                    }
-                }, 1000);
-                
-                isRecording = true;
-                btnToggle.innerText = "DETENER LEVANTAMIENTO";
-                btnToggle.classList.add("recording");
-                
-                statusBadge.innerText = `ENGANCHANDO CONSTELACIÓN...`;
-                statusBadge.classList.add("status-recording");
-                statusBadge.style.background = "#f39c12"; 
-                statusBadge.style.color = "white";
-
-            } else {
-                navigator.geolocation.clearWatch(watchId);
-                clearInterval(timerInterval);
-                clearInterval(loopInterval); // Apagar bucle activo de 1Hz
-                isRecording = false;
-                
-                desactivarWakeLock();
-                
-                btnToggle.innerText = "NUEVO LEVANTAMIENTO";
-                btnToggle.classList.remove("recording");
-                statusBadge.innerText = "LEVANTAMIENTO DETENIDO";
-                statusBadge.classList.remove("status-recording");
-                statusBadge.style.background = "#ddd";
-                statusBadge.style.color = "#555";
-                
-                inputName.disabled = false;
-                modoMedicion.disabled = false;
-                inputName.value = ''; 
-                
-                if(trackpoints.length > 0) {
-                    calcularPromedioRobusto();
-                    actionButtons.style.display = 'flex';
-                    btnDiscard.style.display = 'block';
+            resultados.append({
+                "roverName": rover_file.filename,
+                "baseName": base_file.filename,
+                "modo": modo.upper(),
+                "puntos": f"{puntos_utiles}/{puntos_iniciales} (Síncronos)",
+                "track": track_data,
+                "csv": {
+                    "qaStr": qa_str,
+                    "dop": str(dop_estimado),
+                    "distBase": str(round(dist_base, 3)),
+                    "totalErrE": str(round(error_E_avg, 6)),
+                    "totalErrN": str(round(error_N_avg, 6)),
+                    "totalErrZ": str(round(error_Z_avg, 6)),
+                    "winErrE": str(round(error_E_avg * 0.15, 6)), 
+                    "winErrN": str(round(error_N_avg * 0.15, 6)),
+                    "winErrZ": str(round(error_Z_avg * 0.15, 6)),
+                    "rmsE": str(round(rms_e, 5)),
+                    "rmsN": str(round(rms_n, 5)),
+                    "rmsZ": str(round(rms_z, 5)),
+                    "e": str(round(final_E, 4)),
+                    "n": str(round(final_N, 4)),
+                    "z": str(round(final_Z, 4))
                 }
-            }
-        }
+            })
 
-        // Función del motor de 1Hz que extrae los datos de la caché sin latencia estática
-        function procesarNodoTemporal(position) {
-            const coords = position.coords;
-            const lat = coords.latitude;
-            const lon = coords.longitude;
-            const ele = coords.altitude ? coords.altitude.toFixed(3) : "0.000";
-            const accuracy = coords.accuracy; 
-            const hdop = (accuracy / 4.0).toFixed(2); 
-            const timeIso = new Date(position.timestamp).toISOString();
+        return jsonify({"resultados": resultados}), 200
 
-            const utmVivo = latLonToUTM(lat, lon);
-            document.getElementById('valNorte').innerText = utmVivo.n.toFixed(3);
-            document.getElementById('valEste').innerText = utmVivo.e.toFixed(3);
-            document.getElementById('valEle').innerText = ele;
-            document.getElementById('valAcc').innerText = `±${accuracy.toFixed(1)}m (HDOP: ${hdop})`;
-
-            if(parseFloat(hdop) > 4.0) {
-                rejectedCount++;
-                document.getElementById('valRechazados').innerText = rejectedCount;
-                statusBadge.innerText = `🔴 HDOP RECHAZABLE: ${hdop}`;
-                statusBadge.style.background = "#e74c3c";
-                return; 
-            }
-
-            statusBadge.innerText = `🟢 ADQUISICIÓN ESTABLE (HDOP: ${hdop})`;
-            statusBadge.style.background = "#27ae60";
-
-            // Inyectar a la matriz de almacenamiento temporal
-            trackpoints.push({ lat: lat.toFixed(8), lon: lon.toFixed(8), ele, timeIso, hdop });
-            document.getElementById('valPts').innerText = trackpoints.length;
-        }
-
-        function descartar() {
-            if(confirm(`¿Descartar levantamiento?`)) {
-                trackpoints = [];
-                timeSeconds = 0;
-                rejectedCount = 0;
-                mainTimer.innerText = "00:00";
-                document.getElementById('valPts').innerText = "0";
-                document.getElementById('valRechazados').innerText = "0";
-                actionButtons.style.display = 'none';
-                btnDiscard.style.display = 'none';
-                
-                if(puntosAlmacenados.length > 0) {
-                    puntosAlmacenados.pop();
-                    document.getElementById('valMemoria').innerText = puntosAlmacenados.length;
-                    if(puntosAlmacenados.length === 0) panelLibreta.style.display = 'none';
-                }
-            }
-        }
-
-        function descargarExcel() {
-            if(puntosAlmacenados.length === 0) return;
-            let csvData = "Identificador,Norte (Y),Este (X),Cota (Z),Huso,Precision_RMS(m),Epocas_Grabadas\n";
-            puntosAlmacenados.forEach(pt => {
-                csvData += `${pt.nombre},${pt.norte},${pt.este},${pt.cota},${pt.huso},${pt.rms},${pt.epocas}\n`;
-            });
-            const blob = new Blob([csvData], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `Libreta_Pro_${new Date().getTime()}.csv`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        }
-
-        function descargarDXF() {
-            if(puntosAlmacenados.length === 0) return;
-            let dxf = "  0\r\nSECTION\r\n  2\r\nHEADER\r\n  9\r\n$ACADVER\r\n  1\r\nAC1009\r\n  0\r\nENDSEC\r\n";
-            dxf += "  0\r\nSECTION\r\n  2\r\nTABLES\r\n  0\r\nENDSEC\r\n";
-            dxf += "  0\r\nSECTION\r\n  2\r\nBLOCKS\r\n  0\r\nENDSEC\r\n";
-            dxf += "  0\r\nSECTION\r\n  2\r\nENTITIES\r\n";
-
-            puntosAlmacenados.forEach(pt => {
-                dxf += "  0\r\nPOINT\r\n  8\r\nPuntos\r\n 10\r\n" + pt.este + "\r\n 20\r\n" + pt.norte + "\r\n 30\r\n" + pt.cota + "\r\n";
-                dxf += "  0\r\nTEXT\r\n  8\r\nEtiquetas\r\n 10\r\n" + (parseFloat(pt.este) + 0.5).toFixed(3) + "\r\n 20\r\n" + (parseFloat(pt.norte) + 0.5).toFixed(3) + "\r\n 30\r\n" + pt.cota + "\r\n 40\r\n1.0\r\n  1\r\n" + pt.nombre + "\r\n";
-            });
-
-            if(puntosAlmacenados.length > 1) {
-                dxf += "  0\r\nPOLYLINE\r\n  8\r\nPoligono\r\n 66\r\n1\r\n 10\r\n0.0\r\n 20\r\n0.0\r\n 30\r\n0.0\r\n 70\r\n8\r\n";
-                puntosAlmacenados.forEach(pt => {
-                    dxf += "  0\r\nVERTEX\r\n  8\r\nPoligono\r\n 10\r\n" + pt.este + "\r\n 20\r\n" + pt.norte + "\r\n 30\r\n" + pt.cota + "\r\n";
-                });
-                dxf += "  0\r\nSEQEND\r\n  8\r\nPoligono\r\n";
-            }
-            dxf += "  0\r\nENDSEC\r\n  0\r\nEOF\r\n";
-
-            const blob = new Blob([dxf], { type: 'application/octet-stream' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `Plano_Pro_${new Date().getTime()}.dxf`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        }
-
-        function vaciarLibreta() {
-            if(confirm("¿Vaciar libreta?")) {
-                puntosAlmacenados = [];
-                document.getElementById('valMemoria').innerText = "0";
-                panelLibreta.style.display = 'none';
-                panelPromedio.style.display = 'none';
-            }
-        }
-
-        function generarGPXString() {
-            let gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="ColectoraGps Web v4.2" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${currentPuntoName}</name><time>${trackpoints[0].timeIso}</time></metadata>\n<trk><name>${currentPuntoName}</name><trkseg>\n`;
-            trackpoints.forEach(pt => {
-                gpx += `  <trkpt lat="${pt.lat}" lon="${pt.lon}">\n    <ele>${pt.ele}</ele><time>${pt.timeIso}</time><hdop>${pt.hdop}</hdop>\n  </trkpt>\n`;
-            });
-            gpx += `</trkseg></trk>\n</gpx>`;
-            return gpx;
-        }
-
-        async function exportGPX(share) {
-            if (trackpoints.length === 0) return;
-            const gpxString = generarGPXString();
-            const fileName = `${currentPuntoName}.gpx`;
-            const file = new File([gpxString], fileName, { type: "application/gpx+xml" });
-
-            if (share && navigator.share) {
-                try { await navigator.share({ title: fileName, files: [file] }); } catch (e) {}
-            } else {
-                const link = document.createElement("a");
-                link.href = URL.createObjectURL(file);
-                link.download = fileName;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-            }
-        }
-    </script>
-</body>
-</html>
+    except Exception as e:
+        return jsonify({"error": f"Fallo Crítico Motor Geodésico: {str(e)}"}), 500
