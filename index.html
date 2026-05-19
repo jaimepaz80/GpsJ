@@ -54,12 +54,18 @@
         
         <div class="section">
             <p style="font-size: 0.85rem; color: #555; margin-top: 0;">Bienvenido, <span id="userEmailDisplay" style="font-weight: bold; color: var(--primary);"></span></p>
+            
+            <label style="margin-top:10px;">Modo de Levantamiento Topográfico</label>
+            <select id="modoProcesamiento" style="margin-bottom: 15px; background-color: #ebf5fb; border-color: #3498db;">
+                <option value="estatico" selected>Estático (Punto Fijo - Máxima Precisión)</option>
+                <option value="cinematico">Cinemático (Rastreo de Trayectoria 6D)</option>
+            </select>
+
             <label>1. Archivo Base Conocida (.gpx)</label>
             <input type="file" id="fileBase" accept=".gpx">
             
             <label style="margin-top:15px;">2. Archivos Rover de Campo (.gpx)</label>
             <input type="file" id="fileRovers" multiple accept=".gpx">
-            <p style="font-size: 0.75rem; color: #777; margin-top: 5px;">*Los nombres de los puntos se extraerán automáticamente de los archivos GPX.</p>
         </div>
 
         <div class="section">
@@ -126,7 +132,7 @@
         }
 
         let sessionListenerUnsubscribe = null;
-        let ultimosResultados = []; // Aquí guardaremos los datos para Excel
+        let ultimosResultados = []; 
 
         onAuthStateChanged(auth, async (user) => {
             if (user) {
@@ -147,7 +153,7 @@
                             }
                         }
                     });
-                } catch (e) { console.error("Error al registrar la sesión:", e); }
+                } catch (e) {}
 
             } else {
                 loginScreen.style.display = 'block';
@@ -180,7 +186,7 @@
         btnCalcular.addEventListener('click', async () => {
             const base = document.getElementById('fileBase').files[0];
             const rovers = document.getElementById('fileRovers').files;
-            btnExportar.style.display = 'none'; // Ocultar Excel hasta calcular
+            btnExportar.style.display = 'none'; 
 
             if (!base || rovers.length === 0) { alert("Cargue la Base y al menos un Rover."); return; }
             if (!document.getElementById('baseZ').value) { alert("Debe ingresar la Cota (Z) de la Base Oficial."); return; }
@@ -196,9 +202,10 @@
                 });
             } catch(e) {}
             
-            terminal.innerHTML += "[PROCESANDO] Transfiriendo paquetes a la RAM de Vercel y ejecutando Filtros Kalman...\n";
+            terminal.innerHTML += "[PROCESANDO] Transfiriendo paquetes a la RAM de Vercel y ejecutando Filtros Matemáticos...\n";
             
             const fd = new FormData();
+            fd.append('modo', document.getElementById('modoProcesamiento').value);
             fd.append('base', base);
             for(let r of rovers) fd.append('rovers', r);
             fd.append('baseE', document.getElementById('baseE').value);
@@ -215,44 +222,43 @@
                 if (data.error) { terminal.innerHTML += `\n[ERROR CLOUD] ${data.error}`; } 
                 else {
                     terminal.innerHTML = "";
-                    ultimosResultados = data.resultados; // Guardar para Excel
+                    ultimosResultados = data.resultados; 
                     
                     data.resultados.forEach(r => {
-                        terminal.innerHTML += `>> PUNTO: ${r.roverName} (Base: ${r.baseName})\n`;
+                        terminal.innerHTML += `>> PUNTO: ${r.roverName} (Modo: ${r.modo})\n`;
                         terminal.innerHTML += `Status: ${r.csv.qaStr}\n`;
                         terminal.innerHTML += `Puntos Sincronizados: ${r.puntos} | DOP Medio: ${r.csv.dop}\n`;
-                        terminal.innerHTML += `Línea Base (Distancia a Base): ${r.csv.distBase}m\n`;
-                        terminal.innerHTML += `ERROR TOTAL BASE (SESIÓN) -> E:${r.csv.totalErrE}m | N:${r.csv.totalErrN}m | Z:${r.csv.totalErrZ}m\n`;
-                        terminal.innerHTML += `ERROR BASE (VENTANA)      -> E:${r.csv.winErrE}m | N:${r.csv.winErrN}m | Z:${r.csv.winErrZ}m\n`;
                         terminal.innerHTML += `RUIDO BASE (RMS)          -> E:±${r.csv.rmsE}m | N:±${r.csv.rmsN}m | Z:±${r.csv.rmsZ}m\n`;
                         terminal.innerHTML += `COORD. FINAL (KALMAN)     -> E:${r.csv.e} | N:${r.csv.n} | Z:${r.csv.z}\n`;
+                        if (r.modo === 'CINEMATICO') terminal.innerHTML += `*Se generaron ${r.track.length} coordenadas de trayectoria exportables.\n`;
                         terminal.innerHTML += `--------------------------------------------------\n`;
                     });
                     
-                    // Mostrar el botón de Excel una vez que todo sea exitoso
                     btnExportar.style.display = 'block';
                 }
             } catch (e) { terminal.innerHTML += "\n[ERROR] El servidor en la nube no responde."; }
         });
 
-        // FUNCION: GENERAR EXCEL (CSV)
+        // FUNCION: GENERAR EXCEL (CSV) ADAPTADA A MATRICES DE TRAYECTORIA
         btnExportar.addEventListener('click', () => {
             if (ultimosResultados.length === 0) return;
 
-            let csvContent = "Identificador Rover,Identificador Base,Puntos Sincronizados,Estatus QA,DOP Medio,Distancia a Base (m),Error Total E (m),Error Total N (m),Error Total Z (m),Ruido RMS E (m),Ruido RMS N (m),Ruido RMS Z (m),Coordenada Este (Kalman),Coordenada Norte (Kalman),Cota Z (Kalman)\n";
+            let csvContent = "Identificador Rover,Identificador Base,Modo Levantamiento,Punto/Epoca,Puntos Sincronizados,Estatus QA,DOP Medio,Distancia a Base (m),Error Total E (m),Error Total N (m),Error Total Z (m),Ruido RMS E (m),Ruido RMS N (m),Ruido RMS Z (m),Coordenada Este (Kalman),Coordenada Norte (Kalman),Cota Z (Kalman)\n";
             
             ultimosResultados.forEach(r => {
-                let row = [
-                    r.roverName, r.baseName, r.puntos, r.csv.qaStr, r.csv.dop, r.csv.distBase,
-                    r.csv.totalErrE, r.csv.totalErrN, r.csv.totalErrZ,
-                    r.csv.rmsE, r.csv.rmsN, r.csv.rmsZ,
-                    r.csv.e, r.csv.n, r.csv.z
-                ].join(","); // Separado por comas para formato CSV estándar
-                csvContent += row + "\n";
+                // Si es cinemático, mapea toda la lista de coordenadas. Si es estático, mapea solo la coordenada colapsada.
+                r.track.forEach((pt) => {
+                    let row = [
+                        r.roverName, r.baseName, r.modo, pt.epoca, r.puntos, r.csv.qaStr, r.csv.dop, r.csv.distBase,
+                        r.csv.totalErrE, r.csv.totalErrN, r.csv.totalErrZ,
+                        r.csv.rmsE, r.csv.rmsN, r.csv.rmsZ,
+                        pt.e, pt.n, pt.z
+                    ].join(",");
+                    csvContent += row + "\n";
+                });
             });
 
-            // Forzar la descarga del archivo .csv
-            const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' }); // El \uFEFF asegura que Excel lea los acentos y emojis
+            const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' }); 
             const url = URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.setAttribute("href", url);
