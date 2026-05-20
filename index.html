@@ -7,52 +7,86 @@
     <style>
         :root { --primary: #2c3e50; --accent: #27ae60; --bg: #f4f7f6; --excel: #1d6f42; --danger: #e74c3c; }
         body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        #appScreen { width: 100%; max-width: 700px; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin: 20px; }
+        
+        #loginScreen { width: 100%; max-width: 400px; padding: 30px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; }
+        #appScreen { display: none; width: 100%; max-width: 700px; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin: 20px; }
+        
         h1 { color: var(--primary); margin-bottom: 20px; border-bottom: 2px solid var(--accent); padding-bottom: 10px; }
+        
         .input-group { margin-bottom: 15px; text-align: left; }
         label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 0.85rem; color: #444; }
-        input, select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }
-        button { width: 100%; padding: 14px; background: var(--accent); color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        input[type="email"], input[type="password"], input[type="text"], input[type="number"], select, input[type="file"] { 
+            width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 1rem; 
+        }
+        
+        button { width: 100%; padding: 14px; background: var(--accent); color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px; }
+        button:hover { opacity: 0.9; }
+        .btn-logout { background: var(--danger); width: auto; padding: 8px 15px; float: right; margin-top: 0; font-size: 0.8rem; }
+        
         #btnExportar { background: var(--excel); display: none; margin-top: 15px; }
-        .section { background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #ddd; }
+
+        .section { background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #ddd; clear: both; }
         .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
-        #terminal { background: #111; color: #0f0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 0.85rem; height: 200px; overflow-y: auto; margin-top: 15px; white-space: pre-wrap; }
+        #terminal { background: #111; color: #0f0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 0.85rem; min-height: 200px; overflow-y: auto; margin-top: 15px; white-space: pre-wrap; line-height: 1.4; }
+        #loginError { color: var(--danger); font-size: 0.85rem; margin-top: 10px; display: none; }
     </style>
 </head>
 <body>
 
+    <div id="loginScreen">
+        <h1>GpsN SaaS</h1>
+        <p style="font-size: 0.9rem; color: #666;">Portal de Post-Procesamiento Geodésico</p>
+        <div class="input-group">
+            <label>Usuario (Correo Electrónico)</label>
+            <input type="email" id="txtEmail" placeholder="topografo@empresa.com">
+        </div>
+        <div class="input-group">
+            <label>Contraseña</label>
+            <input type="password" id="txtPassword" placeholder="********">
+        </div>
+        <button id="btnLogin">INICIAR SESIÓN</button>
+        <div id="loginError">Credenciales incorrectas.</div>
+    </div>
+
     <div id="appScreen">
+        <button class="btn-logout" id="btnLogout">Cerrar Sesión</button>
         <h1>GpsN Procesador Diferencial</h1>
         
         <div class="section">
-            <label>Modo de Levantamiento</label>
-            <select id="modoProcesamiento">
-                <option value="estatico" selected>Estático (Punto Fijo)</option>
-                <option value="cinematico">Cinemático (Trayectoria)</option>
+            <p style="font-size: 0.85rem; color: #555; margin-top: 0;">Bienvenido, <span id="userEmailDisplay" style="font-weight: bold; color: var(--primary);"></span></p>
+            
+            <label style="margin-top:10px;">Modo de Levantamiento Topográfico</label>
+            <select id="modoProcesamiento" style="margin-bottom: 15px; background-color: #ebf5fb; border-color: #3498db;">
+                <option value="estatico" selected>Estático (Punto Fijo - Máxima Precisión)</option>
+                <option value="cinematico">Cinemático (Rastreo de Trayectoria 6D)</option>
             </select>
 
-            <label>Archivo Base (.gpx)</label>
+            <label>1. Archivo Base Conocida (.gpx)</label>
             <input type="file" id="fileBase" accept=".gpx">
             
-            <label>Archivos Rover (.gpx)</label>
+            <label style="margin-top:15px;">2. Archivos Rover de Campo (.gpx)</label>
             <input type="file" id="fileRovers" multiple accept=".gpx">
         </div>
 
         <div class="section">
-            <label>Coordenadas Oficiales (Base) y Bastones</label>
+            <label>Coordenadas Oficiales (Base)</label>
             <div class="grid-3">
                 <input type="number" id="baseE" placeholder="Este (X)">
                 <input type="number" id="baseN" placeholder="Norte (Y)">
                 <input type="number" id="baseZ" placeholder="Cota (Z)">
             </div>
+            
             <div class="grid-3" style="margin-top:10px">
-                <input type="number" id="alturaBase" placeholder="Alt. Bastón Base (m)" value="0.000" step="0.001">
-                <input type="number" id="alturaRover" placeholder="Alt. Bastón Rover (m)" value="0.000" step="0.001">
-                <select id="huso">
-                    <option value="18">Huso 18</option>
-                    <option value="19" selected>Huso 19</option>
-                    <option value="20">Huso 20</option>
-                </select>
+                <div>
+                    <label>Huso UTM</label>
+                    <select id="huso">
+                        <option value="18">18</option>
+                        <option value="19" selected>19</option>
+                        <option value="20">20</option>
+                    </select>
+                </div>
+                <div><label>Bastón Base (m)</label><input type="number" id="alturaBase" value="0.000" step="0.001"></div>
+                <div><label>Bastón Rover (m)</label><input type="number" id="alturaRover" value="0.000" step="0.001"></div>
             </div>
         </div>
 
@@ -62,15 +96,114 @@
         <div id="terminal">Sistema listo. Esperando archivos GPX.</div>
     </div>
 
-    <script>
-        document.getElementById('btnCalcular').addEventListener('click', async () => {
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyBAASJamPDpSKU6JZx88oLNQprgwkk3DZs",
+            authDomain: "gpsj-6790c.firebaseapp.com",
+            projectId: "gpsj-6790c",
+            storageBucket: "gpsj-6790c.firebasestorage.app",
+            messagingSenderId: "558545141519",
+            appId: "1:558545141519:web:d21e7360d54db4d84d887a",
+            measurementId: "G-3BQNVX74RS"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        const loginScreen = document.getElementById('loginScreen');
+        const appScreen = document.getElementById('appScreen');
+        const btnLogin = document.getElementById('btnLogin');
+        const btnLogout = document.getElementById('btnLogout');
+        const loginError = document.getElementById('loginError');
+        const userEmailDisplay = document.getElementById('userEmailDisplay');
+        const btnCalcular = document.getElementById('btnCalcular');
+        const btnExportar = document.getElementById('btnExportar');
+        const terminal = document.getElementById('terminal');
+
+        let deviceToken = localStorage.getItem('gpsn_device_token');
+        if (!deviceToken) {
+            deviceToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
+            localStorage.setItem('gpsn_device_token', deviceToken);
+        }
+
+        let sessionListenerUnsubscribe = null;
+        let ultimosResultados = []; 
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                loginScreen.style.display = 'none';
+                appScreen.style.display = 'block';
+                userEmailDisplay.innerText = user.email;
+
+                try {
+                    const userRef = doc(db, "sesiones_activas", user.email);
+                    await setDoc(userRef, { token: deviceToken, ultimoAcceso: serverTimestamp() });
+
+                    sessionListenerUnsubscribe = onSnapshot(userRef, (docSnap) => {
+                        if (docSnap.exists()) {
+                            const dbToken = docSnap.data().token;
+                            if (dbToken && dbToken !== deviceToken) {
+                                alert("⚠️ CIERRE DE SEGURIDAD: Se ha iniciado sesión con esta cuenta en otro dispositivo.");
+                                signOut(auth);
+                            }
+                        }
+                    });
+                } catch (e) {}
+
+            } else {
+                loginScreen.style.display = 'block';
+                appScreen.style.display = 'none';
+                if (sessionListenerUnsubscribe) { sessionListenerUnsubscribe(); sessionListenerUnsubscribe = null; }
+            }
+        });
+
+        btnLogin.addEventListener('click', () => {
+            const email = document.getElementById('txtEmail').value;
+            const pass = document.getElementById('txtPassword').value;
+            btnLogin.innerText = "VERIFICANDO...";
+            
+            signInWithEmailAndPassword(auth, email, pass)
+                .then(() => {
+                    loginError.style.display = 'none';
+                    btnLogin.innerText = "INICIAR SESIÓN";
+                })
+                .catch(() => {
+                    loginError.style.display = 'block';
+                    loginError.innerText = "Credenciales incorrectas o usuario no autorizado.";
+                    btnLogin.innerText = "INICIAR SESIÓN";
+                });
+        });
+
+        btnLogout.addEventListener('click', () => {
+            signOut(auth).then(() => { document.getElementById('txtPassword').value = ""; });
+        });
+
+        btnCalcular.addEventListener('click', async () => {
             const base = document.getElementById('fileBase').files[0];
             const rovers = document.getElementById('fileRovers').files;
-            const terminal = document.getElementById('terminal');
-            
-            if (!base || rovers.length === 0) { alert("Cargue la Base y al menos un Rover."); return; }
+            btnExportar.style.display = 'none'; 
 
-            terminal.innerHTML = "[SISTEMA] Iniciando procesamiento...\n";
+            if (!base || rovers.length === 0) { alert("Cargue la Base y al menos un Rover."); return; }
+            if (!document.getElementById('baseZ').value) { alert("Debe ingresar la Cota (Z) de la Base Oficial."); return; }
+
+            terminal.innerHTML = "[SISTEMA] Conectando con el Servidor Cloud GpsN...\n";
+            
+            try {
+                const auditRef = doc(db, "auditoria_procesamiento", Date.now().toString());
+                setDoc(auditRef, {
+                    usuario: auth.currentUser.email,
+                    fecha: serverTimestamp(),
+                    accion: "Cálculo Solicitado"
+                });
+            } catch(e) {}
+            
+            terminal.innerHTML += "[PROCESANDO] Transfiriendo paquetes a la RAM de Vercel y ejecutando Filtros Matemáticos...\n";
+            
             const fd = new FormData();
             fd.append('modo', document.getElementById('modoProcesamiento').value);
             fd.append('base', base);
@@ -85,14 +218,54 @@
             try {
                 const resp = await fetch('/api/procesar', { method:'POST', body:fd });
                 const data = await resp.json();
-                if (data.error) terminal.innerHTML += `\n[ERROR] ${data.error}`;
+
+                if (data.error) { terminal.innerHTML += `\n[ERROR CLOUD] ${data.error}`; } 
                 else {
+                    terminal.innerHTML = "";
+                    ultimosResultados = data.resultados; 
+                    
                     data.resultados.forEach(r => {
-                        terminal.innerHTML += `>> PUNTO: ${r.roverName}\n   E:${r.e} | N:${r.n} | Z:${r.z} | Pts:${r.puntos}\n`;
+                        terminal.innerHTML += `>> PUNTO: ${r.roverName} (Modo: ${r.modo})\n`;
+                        terminal.innerHTML += `Status: ${r.csv.qaStr}\n`;
+                        terminal.innerHTML += `Puntos Sincronizados: ${r.puntos} | DOP Medio: ${r.csv.dop}\n`;
+                        terminal.innerHTML += `RUIDO BASE (RMS)          -> E:±${r.csv.rmsE}m | N:±${r.csv.rmsN}m | Z:±${r.csv.rmsZ}m\n`;
+                        terminal.innerHTML += `COORD. FINAL (KALMAN)     -> E:${r.csv.e} | N:${r.csv.n} | Z:${r.csv.z}\n`;
+                        if (r.modo === 'CINEMATICO') terminal.innerHTML += `*Se generaron ${r.track.length} coordenadas de trayectoria exportables.\n`;
+                        terminal.innerHTML += `--------------------------------------------------\n`;
                     });
-                    document.getElementById('btnExportar').style.display = 'block';
+                    
+                    btnExportar.style.display = 'block';
                 }
-            } catch (e) { terminal.innerHTML += "\n[ERROR] Fallo de comunicación con el servidor."; }
+            } catch (e) { terminal.innerHTML += "\n[ERROR] El servidor en la nube no responde."; }
+        });
+
+        // FUNCION: GENERAR EXCEL (CSV) ADAPTADA A MATRICES DE TRAYECTORIA
+        btnExportar.addEventListener('click', () => {
+            if (ultimosResultados.length === 0) return;
+
+            let csvContent = "Identificador Rover,Identificador Base,Modo Levantamiento,Punto/Epoca,Puntos Sincronizados,Estatus QA,DOP Medio,Distancia a Base (m),Error Total E (m),Error Total N (m),Error Total Z (m),Ruido RMS E (m),Ruido RMS N (m),Ruido RMS Z (m),Coordenada Este (Kalman),Coordenada Norte (Kalman),Cota Z (Kalman)\n";
+            
+            ultimosResultados.forEach(r => {
+                // Si es cinemático, mapea toda la lista de coordenadas. Si es estático, mapea solo la coordenada colapsada.
+                r.track.forEach((pt) => {
+                    let row = [
+                        r.roverName, r.baseName, r.modo, pt.epoca, r.puntos, r.csv.qaStr, r.csv.dop, r.csv.distBase,
+                        r.csv.totalErrE, r.csv.totalErrN, r.csv.totalErrZ,
+                        r.csv.rmsE, r.csv.rmsN, r.csv.rmsZ,
+                        pt.e, pt.n, pt.z
+                    ].join(",");
+                    csvContent += row + "\n";
+                });
+            });
+
+            const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' }); 
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.setAttribute("href", url);
+            link.setAttribute("download", "Reporte_Geodesico_GpsN.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
         });
     </script>
 </body>
