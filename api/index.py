@@ -226,9 +226,10 @@ def procesar():
         err_N_matriz = n_base_unique - baseN_oficial
         err_Z_matriz = (z_base_unique - alturaBase) - baseZ_oficial
 
-        # SUAVIZADO DIFERENCIAL PLANIMÉTRICO (Media Móvil 15 épocas)
+        # SUAVIZADO DIFERENCIAL 3D (Media Móvil 15 épocas para X, Y, Z)
         err_E_matriz = moving_average(err_E_matriz, 15)
         err_N_matriz = moving_average(err_N_matriz, 15)
+        err_Z_matriz = moving_average(err_Z_matriz, 15) # Cota Z ahora es dinámica
 
         error_E_avg, error_N_avg, error_Z_avg = float(np.mean(err_E_matriz)), float(np.mean(err_N_matriz)), float(np.mean(err_Z_matriz))
         resultados = []
@@ -258,15 +259,15 @@ def procesar():
             if puntos_comunes == 0:
                 return jsonify({"error": f"FALLO DE INTERSECCIÓN: Cero puntos síncronos para {rover_file.filename}."}), 400
 
+            # INTERPOLACIÓN DINÁMICA DE LOS 3 EJES (Época a Época)
             err_E_int = np.interp(t_rov, t_base_unique, err_E_matriz)
             err_N_int = np.interp(t_rov, t_base_unique, err_N_matriz)
+            err_Z_int = np.interp(t_rov, t_base_unique, err_Z_matriz) # Interpola el error Z exacto de cada milisegundo
             
-            # DESACOPLE ALTIMÉTRICO: Aplicar el sesgo de elevación estático en lugar del ruido instantáneo
-            err_Z_estatico = np.full_like(t_rov, error_Z_avg)
-            
+            # Corrección diferencial pura
             e_rov_corr = e_rov - err_E_int
             n_rov_corr = n_rov - err_N_int
-            z_rov_corr = (z_rov - alturaRover) - err_Z_estatico
+            z_rov_corr = (z_rov - alturaRover) - err_Z_int # Resta dinámica en Z
             
             t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
             
