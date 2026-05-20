@@ -8,6 +8,10 @@ import math
 app = Flask(__name__)
 CORS(app)
 
+# ==============================================================================
+# FILTROS Y PROCESAMIENTO MATEMÁTICO (Arquitectura Completa)
+# ==============================================================================
+
 def moving_average(data, window_size=15):
     """
     Filtro de media móvil para suavizar el error diferencial temporal.
@@ -196,6 +200,10 @@ def procesar_gpx_crudo(file_stream, huso):
     estes, nortes = myProj(np.array(lons), np.array(lats))
     return np.array(t_list), estes, nortes, np.array(eles), np.array(hdops)
 
+# ==============================================================================
+# ENDPOINT DE PROCESAMIENTO (API REST)
+# ==============================================================================
+
 @app.route('/api/procesar', methods=['POST'])
 def procesar():
     try:
@@ -216,7 +224,6 @@ def procesar():
         t_base, e_base, n_base, z_base, _ = procesar_gpx_crudo(base_file, huso)
         if t_base is None: return jsonify({"error": "Archivo Base vacío o corrupto."}), 400
         
-        # LIMPIEZA DEL VECTOR TEMPORAL: Eliminación de marcas de tiempo duplicadas
         t_base_unique, indices_unicos = np.unique(t_base, return_index=True)
         e_base_unique = e_base[indices_unicos]
         n_base_unique = n_base[indices_unicos]
@@ -226,10 +233,9 @@ def procesar():
         err_N_matriz = n_base_unique - baseN_oficial
         err_Z_matriz = (z_base_unique - alturaBase) - baseZ_oficial
 
-        # SUAVIZADO DIFERENCIAL 3D (Media Móvil 15 épocas para X, Y, Z)
         err_E_matriz = moving_average(err_E_matriz, 15)
         err_N_matriz = moving_average(err_N_matriz, 15)
-        err_Z_matriz = moving_average(err_Z_matriz, 15) # Cota Z ahora es dinámica
+        err_Z_matriz = moving_average(err_Z_matriz, 15) 
 
         error_E_avg, error_N_avg, error_Z_avg = float(np.mean(err_E_matriz)), float(np.mean(err_N_matriz)), float(np.mean(err_Z_matriz))
         resultados = []
@@ -244,9 +250,7 @@ def procesar():
             fin_comun = min(t_base_unique[-1], t_rov[-1])
             
             if inicio_comun > fin_comun:
-                return jsonify({
-                    "error": f"FALLO CRÍTICO DE SINCRONIZACIÓN: El Rover [{rover_file.filename}] y la Base [{base_file.filename}] no poseen ventanas de tiempo en común."
-                }), 400
+                return jsonify({"error": "Fallo sincronización: ventanas temporales incompatibles."}), 400
 
             mask_rov = (t_rov >= inicio_comun) & (t_rov <= fin_comun)
             t_rov = t_rov[mask_rov]
@@ -255,19 +259,13 @@ def procesar():
             z_rov = z_rov[mask_rov]
             hdop_rov = hdop_rov[mask_rov]
             
-            puntos_comunes = len(t_rov)
-            if puntos_comunes == 0:
-                return jsonify({"error": f"FALLO DE INTERSECCIÓN: Cero puntos síncronos para {rover_file.filename}."}), 400
-
-            # INTERPOLACIÓN DINÁMICA DE LOS 3 EJES (Época a Época)
             err_E_int = np.interp(t_rov, t_base_unique, err_E_matriz)
             err_N_int = np.interp(t_rov, t_base_unique, err_N_matriz)
-            err_Z_int = np.interp(t_rov, t_base_unique, err_Z_matriz) # Interpola el error Z exacto de cada milisegundo
+            err_Z_int = np.interp(t_rov, t_base_unique, err_Z_matriz)
             
-            # Corrección diferencial pura
             e_rov_corr = e_rov - err_E_int
             n_rov_corr = n_rov - err_N_int
-            z_rov_corr = (z_rov - alturaRover) - err_Z_int # Resta dinámica en Z
+            z_rov_corr = (z_rov - alturaRover) - err_Z_int
             
             t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
             
@@ -286,25 +284,12 @@ def procesar():
             dist_base = math.sqrt((final_E - base_e_cen)**2 + (final_N - base_n_cen)**2)
             
             rms_total = rms_e + rms_n + rms_z
-            dop_estimado = round((rms_total / 3) + 0.8, 2)
             qa_str = "[ÓPTIMO 🟢]" if rms_total < 0.8 else ("[ACEPTABLE 🟡]" if rms_total < 2.0 else "[DEFICIENTE 🔴]")
 
             resultados.append({
                 "roverName": rover_file.filename,
-                "baseName": base_file.filename,
-                "modo": modo.upper(),
-                "puntos": f"{puntos_utiles}/{puntos_iniciales} (Síncronos)",
-                "track": track_data,
                 "csv": {
                     "qaStr": qa_str,
-                    "dop": str(dop_estimado),
-                    "distBase": str(round(dist_base, 3)),
-                    "totalErrE": str(round(error_E_avg, 6)),
-                    "totalErrN": str(round(error_N_avg, 6)),
-                    "totalErrZ": str(round(error_Z_avg, 6)),
-                    "winErrE": str(round(error_E_avg * 0.15, 6)), 
-                    "winErrN": str(round(error_N_avg * 0.15, 6)),
-                    "winErrZ": str(round(error_Z_avg * 0.15, 6)),
                     "rmsE": str(round(rms_e, 5)),
                     "rmsN": str(round(rms_n, 5)),
                     "rmsZ": str(round(rms_z, 5)),
@@ -318,3 +303,6 @@ def procesar():
 
     except Exception as e:
         return jsonify({"error": f"Fallo Crítico Motor Geodésico: {str(e)}"}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
