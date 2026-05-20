@@ -1,59 +1,45 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <title>GpsJ Core - Procesador Diferencial</title>
+    <meta charset="UTF-8"><title>GpsJ - Procesador Profesional</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; padding: 20px; line-height: 1.6; background: #f4f7f6; }
-        .box { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: white; max-width: 500px; margin: auto; }
-        input, button { width: 100%; margin-bottom: 10px; padding: 10px; box-sizing: border-box; }
-        button { background: #27ae60; color: white; border: none; cursor: pointer; font-weight: bold; }
-        #resultado { margin-top: 20px; white-space: pre-wrap; background: #2c3e50; color: #0f0; padding: 15px; border-radius: 5px; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; padding: 20px; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+        textarea { width: 100%; height: 200px; background: #111; color: #0f0; font-family: monospace; padding: 10px; margin-top: 20px; }
+        button { background: #2c3e50; color: white; padding: 15px; border: none; width: 100%; cursor: pointer; font-weight: bold; }
     </style>
 </head>
 <body>
-    <div class="box">
-        <h1>GpsJ Diferencial</h1>
-        <input type="file" id="fileBase" placeholder="Archivo Base (.gpx)">
-        <input type="file" id="fileRovers" multiple placeholder="Archivos Rover (.gpx)">
-        <input type="number" id="baseE" placeholder="Este Oficial Base (X)">
-        <input type="number" id="baseN" placeholder="Norte Oficial Base (Y)">
-        <input type="number" id="baseZ" placeholder="Cota Oficial Base (Z)">
-        <input type="number" id="alturaBase" placeholder="Altura Bastón Base (m)" value="0.000" step="0.001">
-        <input type="number" id="alturaRover" placeholder="Altura Bastón Rover (m)" value="0.000" step="0.001">
-        <button id="btnCalcular">PROCESAR DIFERENCIAL</button>
+    <div class="container">
+        <h1>GpsJ Professional Edition</h1>
+        <input type="file" id="fileBase" placeholder="Base"><br>
+        <input type="file" id="fileRovers" multiple placeholder="Rover"><br>
+        <div class="grid">
+            <input type="number" id="baseE" placeholder="E">
+            <input type="number" id="baseN" placeholder="N">
+            <input type="number" id="baseZ" placeholder="Z">
+        </div>
+        <button id="btnCalcular">INICIAR CÁLCULO DIFERENCIAL</button>
+        <textarea id="log" readonly>Sistema listo...</textarea>
     </div>
-    <div id="resultado">Esperando archivos...</div>
-
     <script>
         document.getElementById('btnCalcular').onclick = async () => {
+            const log = document.getElementById('log');
+            log.value = "[INICIANDO] Analizando archivos...\n";
             const fd = new FormData();
-            
-            // Archivos
             fd.append('base', document.getElementById('fileBase').files[0]);
             for(let r of document.getElementById('fileRovers').files) fd.append('rovers', r);
-            
-            // Coordenadas y Alturas (Variables necesarias para el motor)
             fd.append('baseE', document.getElementById('baseE').value);
             fd.append('baseN', document.getElementById('baseN').value);
             fd.append('baseZ', document.getElementById('baseZ').value);
-            fd.append('alturaBase', document.getElementById('alturaBase').value);
-            fd.append('alturaRover', document.getElementById('alturaRover').value);
             
-            document.getElementById('resultado').innerText = "Procesando en la nube...";
-
             try {
-                const resp = await fetch('/api/procesar', { method:'POST', body:fd });
-                const data = await resp.json();
-                
-                if (data.error) {
-                    document.getElementById('resultado').innerText = "ERROR: " + data.error;
-                } else {
-                    document.getElementById('resultado').innerText = JSON.stringify(data.resultados, null, 2);
-                }
-            } catch (e) {
-                document.getElementById('resultado').innerText = "Error de conexión con el servidor.";
-            }
+                const r = await fetch('/api/procesar', { method:'POST', body:fd });
+                const d = await r.json();
+                if(d.error) log.value += "[ERROR] " + d.error;
+                else d.resultados.forEach(res => log.value += `[EXITO] ${res.rover}: E:${res.e} N:${res.n} Z:${res.z} (Pts: ${res.puntos})\n`);
+            } catch(e) { log.value += "[CRITICO] Error de conexión"; }
         };
     </script>
 </body>
