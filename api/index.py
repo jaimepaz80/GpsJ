@@ -8,83 +8,68 @@ import math
 app = Flask(__name__)
 CORS(app)
 
-def moving_average(data, window_size=5):
+def moving_average(data, window_size=15):
     """
-    MEJORA 3: Reducción de Inercia. 
-    Ventana reducida de 15 a 5 para mitigar el desfase temporal.
-    Permite reacciones casi instantáneas a las fluctuaciones atmosféricas reales.
+    Filtro de media móvil simétrico (fase cero) para suavizar el error diferencial.
+    Evita el lag temporal que corrompe la interpolación de épocas síncronas.
     """
     if len(data) < window_size:
         return data
     window = np.ones(int(window_size)) / float(window_size)
     smoothed = np.convolve(data, window, 'same')
+    
+    # Reparar los bordes distorsionados por la convolución con suavizado progresivo
     pad_len = window_size // 2
-    smoothed[:pad_len] = data[:pad_len]
-    smoothed[-pad_len:] = data[-pad_len:]
+    for i in range(pad_len):
+        smoothed[i] = np.mean(data[:i+1+pad_len])
+        smoothed[-(i+1)] = np.mean(data[-(i+1+pad_len):])
     return smoothed
 
-def filtro_mad(z_vals, threshold=3.5):
+def eliminar_valores_atipicos_iqr(t, x, y, z, hdop):
     """
-    MEJORA 2: Filtro de Desviación Absoluta de la Mediana (MAD).
-    Exclusivo para la Cota (Z). Al usar la Mediana en lugar del Promedio,
-    es completamente inmune a los picos de error extremos de la API de Android.
-    """
-    if len(z_vals) < 4: return np.ones(len(z_vals), dtype=bool)
-    med = np.median(z_vals)
-    mad = np.median(np.abs(z_vals - med))
-    if mad < 1e-6: mad = 1e-6 # Prevenir división por cero
-    z_scores = (np.abs(z_vals - med) / mad)
-    return z_scores < threshold
-
-def eliminar_valores_atipicos_hibrido(t, x, y, z, hdop):
-    """
-    Filtro Híbrido: IQR para Planimetría (tolerancia normal) + MAD para Altimetría (destrucción de picos).
+    Filtro IQR Asimétrico: Tolerancia planimétrica normal (1.5), rigidez altimétrica extrema (1.0).
     """
     if len(x) < 4: return t, x, y, z, hdop
     
-    # Planimetría (IQR)
     q1_x, q3_x = np.percentile(x, [25, 75]); iqr_x = q3_x - q1_x
     q1_y, q3_y = np.percentile(y, [25, 75]); iqr_y = q3_y - q1_y
+    q1_z, q3_z = np.percentile(z, [25, 75]); iqr_z = q3_z - q1_z
     
     lim_inf_x, lim_sup_x = q1_x - 1.5 * iqr_x, q3_x + 1.5 * iqr_x
     lim_inf_y, lim_sup_y = q1_y - 1.5 * iqr_y, q3_y + 1.5 * iqr_y
+    lim_inf_z, lim_sup_z = q1_z - 1.0 * iqr_z, q3_z + 1.0 * iqr_z
     
-    mask_xy = (x >= lim_inf_x) & (x <= lim_sup_x) & \
-              (y >= lim_inf_y) & (y <= lim_sup_y)
-              
-    # Altimetría (MAD)
-    mask_z = filtro_mad(z, threshold=3.5)
-    
-    mask_total = mask_xy & mask_z
+    mask = (x >= lim_inf_x) & (x <= lim_sup_x) & \
+           (y >= lim_inf_y) & (y <= lim_sup_y) & \
+           (z >= lim_inf_z) & (z <= lim_sup_z)
            
-    return t[mask_total], x[mask_total], y[mask_total], z[mask_total], hdop[mask_total]
+    return t[mask], x[mask], y[mask], z[mask], hdop[mask]
 
 def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
+    """
+    Motor Kalman Asimétrico optimizado para convergencia.
+    MODIFICACIÓN: Eliminación del sesgo de la mediana altimétrica.
+    """
     num_puntos = len(e_vals)
     if num_puntos == 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    z_median = np.median(z_vals)
-    X = np.array([[e_vals[0]], [n_vals[0]], [z_median]])
+    X = np.array([[e_vals[0]], [n_vals[0]], [z_vals[0]]])
     P = np.eye(3) * 1.0
     
-    Q = np.diag([0.001, 0.001, 0.0005]) 
+    # RELAJACIÓN DE Q: Permite al filtro adaptarse a la tendencia real en lugar de congelarse
+    Q = np.diag([0.001, 0.001, 0.005]) 
     
     var_e = np.var(e_vals) if num_puntos > 1 and np.var(e_vals) > 0 else 1.0
     var_n = np.var(n_vals) if num_puntos > 1 and np.var(n_vals) > 0 else 1.0
-    
-    var_z_base = np.var(z_vals) if num_puntos > 1 and np.var(z_vals) > 0 else 1.0
-    # MEJORA: Se eliminó el castigo excesivo (* 10.0) a la varianza Z.
-    var_z = var_z_base * 2.0 
+    var_z = np.var(z_vals) if num_puntos > 1 and np.var(z_vals) > 0 else 1.0 
 
     X_hist, P_hist, X_pred_hist, P_pred_hist = [], [], [], []
 
     for i in range(num_puntos):
         factor_hdop = (hdop_vals[i]**2) if hdop_vals[i] > 0 else 1.0
         
-        desviacion_z = abs(z_vals[i] - z_median)
-        factor_z = factor_hdop * (1.0 + desviacion_z)
-        
-        R = np.diag([var_e * factor_hdop, var_n * factor_hdop, var_z * factor_z])
+        # Eliminada la penalización artificial sobre la varianza de Z
+        R = np.diag([var_e * factor_hdop, var_n * factor_hdop, var_z * factor_hdop])
         
         X_pred, P_pred = X, P + Q
         X_pred_hist.append(X_pred)
@@ -106,20 +91,18 @@ def filtro_kalman_estatico_estricto(e_vals, n_vals, z_vals, hdop_vals):
         C = np.dot(P_hist[k], P_pred_next_inv)
         X_smoothed[k] = X_smoothed[k] + np.dot(C, (X_smoothed[k+1] - X_pred_hist[k+1]))
         
-    sum_e, sum_n, sum_z, sum_w, sum_w_z = 0, 0, 0, 0, 0
+    sum_e, sum_n, sum_z, sum_w = 0, 0, 0, 0
     for k in range(num_puntos):
         w = 1.0 / (hdop_vals[k] + 0.001)
-        w_z = w / (1.0 + abs(X_smoothed[k][2,0] - z_median))
         
         sum_e += X_smoothed[k][0,0] * w
         sum_n += X_smoothed[k][1,0] * w
-        sum_z += X_smoothed[k][2,0] * w_z
+        sum_z += X_smoothed[k][2,0] * w
         sum_w += w
-        sum_w_z += w_z
         
     final_E = sum_e / sum_w
     final_N = sum_n / sum_w
-    final_Z = sum_z / sum_w_z
+    final_Z = sum_z / sum_w
 
     smoothed_e = np.array([x[0,0] for x in X_smoothed])
     smoothed_n = np.array([x[1,0] for x in X_smoothed])
@@ -196,16 +179,10 @@ def procesar_gpx_crudo(file_stream, huso):
         for segment in track.segments:
             for pt in segment.points:
                 if pt.elevation is not None:
-                    hdop_val = pt.horizontal_dilution if pt.horizontal_dilution is not None else 1.0
-                    
-                    # MEJORA 1: Barrera de entrada. Destruir épocas con HDOP basura (Mala geometría satelital)
-                    if hdop_val > 2.5: 
-                        continue
-                        
                     lats.append(pt.latitude)
                     lons.append(pt.longitude)
                     eles.append(pt.elevation)
-                    hdops.append(hdop_val)
+                    hdops.append(pt.horizontal_dilution if pt.horizontal_dilution is not None else 1.0)
                     t_list.append(pt.time.timestamp() if pt.time else float(idx))
                     idx += 1
 
@@ -235,6 +212,7 @@ def procesar():
         t_base, e_base, n_base, z_base, _ = procesar_gpx_crudo(base_file, huso)
         if t_base is None: return jsonify({"error": "Archivo Base vacío o corrupto."}), 400
         
+        # LIMPIEZA DEL VECTOR TEMPORAL: Eliminación de marcas de tiempo duplicadas
         t_base_unique, indices_unicos = np.unique(t_base, return_index=True)
         e_base_unique = e_base[indices_unicos]
         n_base_unique = n_base[indices_unicos]
@@ -244,9 +222,10 @@ def procesar():
         err_N_matriz = n_base_unique - baseN_oficial
         err_Z_matriz = (z_base_unique - alturaBase) - baseZ_oficial
 
-        err_E_matriz = moving_average(err_E_matriz, 5) # Ventana reducida
-        err_N_matriz = moving_average(err_N_matriz, 5) # Ventana reducida
-        err_Z_matriz = moving_average(err_Z_matriz, 5) # Ventana reducida
+        # SUAVIZADO DIFERENCIAL 3D (Media Móvil Simétrica 15 épocas para X, Y, Z)
+        err_E_matriz = moving_average(err_E_matriz, 15)
+        err_N_matriz = moving_average(err_N_matriz, 15)
+        err_Z_matriz = moving_average(err_Z_matriz, 15) 
 
         error_E_avg, error_N_avg, error_Z_avg = float(np.mean(err_E_matriz)), float(np.mean(err_N_matriz)), float(np.mean(err_Z_matriz))
         resultados = []
@@ -276,15 +255,17 @@ def procesar():
             if puntos_comunes == 0:
                 return jsonify({"error": f"FALLO DE INTERSECCIÓN: Cero puntos síncronos para {rover_file.filename}."}), 400
 
+            # INTERPOLACIÓN DINÁMICA DE LOS 3 EJES (Época a Época)
             err_E_int = np.interp(t_rov, t_base_unique, err_E_matriz)
             err_N_int = np.interp(t_rov, t_base_unique, err_N_matriz)
             err_Z_int = np.interp(t_rov, t_base_unique, err_Z_matriz) 
             
+            # Corrección diferencial pura
             e_rov_corr = e_rov - err_E_int
             n_rov_corr = n_rov - err_N_int
             z_rov_corr = (z_rov - alturaRover) - err_Z_int 
             
-            t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_hibrido(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
+            t_lim, e_lim, n_lim, z_lim, hdop_lim = eliminar_valores_atipicos_iqr(t_rov, e_rov_corr, n_rov_corr, z_rov_corr, hdop_rov)
             
             puntos_utiles = len(t_lim)
             if puntos_utiles == 0: continue
